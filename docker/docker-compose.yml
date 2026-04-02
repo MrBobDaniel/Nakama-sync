@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  # --------------------------------------------------------------------------------
+  # Nakama Node.js Signaling Server
+  # Handles WebRTC SDP exchanges between Lane 2 Walkie-Talkie clients.
+  # --------------------------------------------------------------------------------
+  signaling:
+    build:
+      context: ./signaling
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+    restart: unless-stopped
