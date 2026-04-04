@@ -1,33 +1,42 @@
-import 'package:socket_io_client/socket_io_client.dart' as IO;
+import 'package:flutter/foundation.dart';
+import 'package:socket_io_client/socket_io_client.dart' as io;
 
 typedef OnSignalCallback = void Function(Map<String, dynamic> data);
 typedef OnPeerJoinedCallback = void Function(String peerId);
 typedef OnPeerLeftCallback = void Function(String peerId);
+typedef OnRoomPeersCallback = void Function(List<String> peerIds);
 
 class SignalingClient {
-  late IO.Socket _socket;
+  late io.Socket _socket;
   final String serverUrl;
 
   OnSignalCallback? onSignal;
   OnPeerJoinedCallback? onPeerJoined;
   OnPeerLeftCallback? onPeerLeft;
+  OnRoomPeersCallback? onRoomPeers;
 
   SignalingClient(this.serverUrl);
 
   void connect(String roomId) {
-    _socket = IO.io(serverUrl, IO.OptionBuilder()
+    _socket = io.io(serverUrl, io.OptionBuilder()
         .setTransports(['websocket'])
         .enableAutoConnect()
         .build());
 
     _socket.onConnect((_) {
-      print('Signaling connected');
+      debugPrint('Signaling connected');
       _socket.emit('join', roomId);
     });
 
     _socket.on('peer-joined', (peerId) {
-      print('Peer joined: $peerId');
+      debugPrint('Peer joined: $peerId');
       onPeerJoined?.call(peerId);
+    });
+
+    _socket.on('room-peers', (peerIds) {
+      final normalizedPeerIds =
+          (peerIds as List<dynamic>).map((peerId) => peerId.toString()).toList();
+      onRoomPeers?.call(normalizedPeerIds);
     });
 
     _socket.on('signal', (data) {
@@ -35,7 +44,7 @@ class SignalingClient {
     });
 
     _socket.on('peer-left', (peerId) {
-      print('Peer left: $peerId');
+      debugPrint('Peer left: $peerId');
       onPeerLeft?.call(peerId);
     });
   }

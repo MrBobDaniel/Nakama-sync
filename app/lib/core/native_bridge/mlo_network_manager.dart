@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Bridges the Wi-Fi 7 Explicit Native APIs configuring "Diversity Mode".
@@ -10,7 +11,7 @@ class MloNetworkManager {
     try {
       await _channel.invokeMethod('initializeDiversityMode', {'peerId': peerId});
     } on PlatformException catch (e) {
-      print("Failed to initialize MLO Diversity Mode: '${e.message}'.");
+      debugPrint("Failed to initialize MLO Diversity Mode: '${e.message}'.");
     }
   }
 }

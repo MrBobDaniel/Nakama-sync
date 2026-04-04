@@ -19,16 +19,18 @@ io.on('connection', (socket) => {
   // Join a specified room (e.g., walkie-talkie channel)
   socket.on('join', (roomId) => {
     socket.join(roomId);
-    
-    // Notify others in the room
-    socket.to(roomId).emit('peer-joined', socket.id);
-    console.log(`Client ${socket.id} joined room ${roomId}`);
-    
-    // Optionally keep track locally
+
     if (!rooms.has(roomId)) {
       rooms.set(roomId, new Set());
     }
-    rooms.get(roomId).add(socket.id);
+
+    const peers = rooms.get(roomId);
+    const existingPeers = Array.from(peers);
+    peers.add(socket.id);
+
+    socket.emit('room-peers', existingPeers);
+    socket.to(roomId).emit('peer-joined', socket.id);
+    console.log(`Client ${socket.id} joined room ${roomId}`);
   });
 
   // Relay WebRTC SDP Offers/Answers/ICECandidates

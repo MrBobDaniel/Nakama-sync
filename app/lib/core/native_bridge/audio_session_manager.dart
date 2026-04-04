@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Reactive Streams emitting link-switching events, mixing Subsonic audio 
@@ -11,7 +12,7 @@ class AudioSessionManager {
     try {
       await _channel.invokeMethod('requestPriorityVoiceCall');
     } on PlatformException catch (e) {
-      print("Failed to request priority voice call: '${e.message}'.");
+      debugPrint("Failed to request priority voice call: '${e.message}'.");
     }
   }
 

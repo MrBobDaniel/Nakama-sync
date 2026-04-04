@@ -1,15 +1,59 @@
 import 'package:flutter_bloc/flutter_bloc.dart';
 
-abstract class CommsEvent {}
-abstract class CommsState {}
+import 'data/repositories/webrtc_service.dart';
+import 'comms_event.dart';
+import 'comms_state.dart';
 
-class CommsInitial extends CommsState {}
-
-/// BLoC handling Lane 2: Zero-latency P2P walkie-talkie link handling WebRTC logic
 class CommsBloc extends Bloc<CommsEvent, CommsState> {
-  CommsBloc() : super(CommsInitial()) {
-    on<CommsEvent>((event, emit) {
-      // Event handling logic
-    });
+  CommsBloc({
+    required WebRtcService webRtcService,
+  })  : _webRtcService = webRtcService,
+        super(const CommsInitial()) {
+    on<ConnectToRoomRequested>(_onConnectToRoomRequested);
+    on<DisconnectRequested>(_onDisconnectRequested);
+    on<PushToTalkChanged>(_onPushToTalkChanged);
+  }
+
+  final WebRtcService _webRtcService;
+
+  Future<void> _onConnectToRoomRequested(
+    ConnectToRoomRequested event,
+    Emitter<CommsState> emit,
+  ) async {
+    emit(CommsConnecting(event.roomId));
+
+    try {
+      await _webRtcService.initialize(event.roomId);
+      emit(CommsConnected(event.roomId));
+    } catch (error) {
+      emit(CommsFailure(error.toString()));
+    }
+  }
+
+  Future<void> _onDisconnectRequested(
+    DisconnectRequested event,
+    Emitter<CommsState> emit,
+  ) async {
+    await _webRtcService.dispose();
+    emit(const CommsInitial());
+  }
+
+  Future<void> _onPushToTalkChanged(
+    PushToTalkChanged event,
+    Emitter<CommsState> emit,
+  ) async {
+    final currentState = state;
+    if (currentState is! CommsConnected) {
+      return;
+    }
+
+    await _webRtcService.setPushToTalkActive(event.isActive);
+    emit(currentState.copyWith(isTransmitting: event.isActive));
+  }
+
+  @override
+  Future<void> close() async {
+    await _webRtcService.dispose();
+    return super.close();
   }
 }

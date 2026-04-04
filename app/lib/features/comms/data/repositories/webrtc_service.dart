@@ -1,23 +1,23 @@
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+
 import '../../../../core/native_bridge/mlo_network_manager.dart';
-import 'signaling_client.dart';
+import '../datasources/signaling_client.dart';
 
 class WebRtcService {
   final SignalingClient signaling;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
+  final Set<String> _remotePeerIds = <String>{};
 
   Function(MediaStream)? onRemoteStreamAdded;
 
   WebRtcService(this.signaling) {
     signaling.onSignal = _handleSignal;
     signaling.onPeerJoined = _handlePeerJoined;
+    signaling.onRoomPeers = _handleRoomPeers;
   }
 
   Future<void> initialize(String roomId) async {
-    // Attempt MLO Diversity mode explicitly for Opus redundancy on hardware link
-    await MloNetworkManager.initializeDiversityMode("remote_peer_placeholder");
-
     final configuration = {
       'iceServers': [
         {'urls': 'stun:stun.l.google.com:19302'},
@@ -28,11 +28,12 @@ class WebRtcService {
     _peerConnection = await createPeerConnection(configuration);
 
     _peerConnection?.onIceCandidate = (candidate) {
-      // Broadcast ICE candidate to remote peer
-      signaling.sendSignal('remote_peer', {
-        'type': 'candidate',
-        'candidate': candidate.toMap(),
-      });
+      for (final remotePeerId in _remotePeerIds) {
+        signaling.sendSignal(remotePeerId, {
+          'type': 'candidate',
+          'candidate': candidate.toMap(),
+        });
+      }
     };
 
     _peerConnection?.onTrack = (event) {
@@ -54,31 +55,52 @@ class WebRtcService {
     _localStream?.getTracks().forEach((track) {
       _peerConnection?.addTrack(track, _localStream!);
     });
+    await setPushToTalkActive(false);
 
     signaling.connect(roomId);
   }
 
-  Future<void> _handlePeerJoined(String peerId) async {
-    // Initiate SDP Offer when a peer joins
-    if (_peerConnection != null) {
-      final offer = await _peerConnection!.createOffer();
-      await _peerConnection!.setLocalDescription(offer);
-
-      signaling.sendSignal(peerId, {
-        'type': offer.type,
-        'sdp': offer.sdp,
-      });
+  Future<void> setPushToTalkActive(bool isActive) async {
+    final audioTracks = _localStream?.getAudioTracks() ?? const <MediaStreamTrack>[];
+    for (final track in audioTracks) {
+      track.enabled = isActive;
     }
   }
 
+  Future<void> _handleRoomPeers(List<String> peerIds) async {
+    for (final peerId in peerIds) {
+      await _handlePeerJoined(peerId);
+    }
+  }
+
+  Future<void> _handlePeerJoined(String peerId) async {
+    if (_peerConnection == null || _remotePeerIds.contains(peerId)) {
+      return;
+    }
+
+    _remotePeerIds.add(peerId);
+    await MloNetworkManager.initializeDiversityMode(peerId);
+
+    final offer = await _peerConnection!.createOffer();
+    await _peerConnection!.setLocalDescription(offer);
+
+    signaling.sendSignal(peerId, {
+      'type': offer.type,
+      'sdp': offer.sdp,
+    });
+  }
+
   Future<void> _handleSignal(Map<String, dynamic> data) async {
-    final sender = data['sender'];
-    final payload = data['signalData'];
+    final sender = data['sender'] as String;
+    final payload = data['signalData'] as Map<String, dynamic>;
     final type = payload['type'];
 
     if (_peerConnection == null) return;
 
+    _remotePeerIds.add(sender);
+
     if (type == 'offer') {
+      await MloNetworkManager.initializeDiversityMode(sender);
       await _peerConnection!.setRemoteDescription(
         RTCSessionDescription(payload['sdp'], type),
       );
@@ -106,10 +128,14 @@ class WebRtcService {
   }
 
   Future<void> dispose() async {
+    await setPushToTalkActive(false);
     signaling.disconnect();
+    _remotePeerIds.clear();
     _localStream?.getTracks().forEach((track) => track.stop());
     _localStream?.dispose();
+    _localStream = null;
     _peerConnection?.close();
     _peerConnection?.dispose();
+    _peerConnection = null;
   }
 }
