@@ -243,9 +243,8 @@ class NearbyConnectionsBridge(
     private fun getMissingPermissions(): List<String> {
         val permissions = buildList {
             add(Manifest.permission.RECORD_AUDIO)
-            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
-                add(Manifest.permission.ACCESS_FINE_LOCATION)
-            }
+            add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            add(Manifest.permission.ACCESS_FINE_LOCATION)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 add(Manifest.permission.BLUETOOTH_SCAN)
                 add(Manifest.permission.BLUETOOTH_CONNECT)
@@ -588,7 +587,8 @@ class NearbyConnectionsBridge(
     }
 
     private fun handleRequestConnectionFailure(endpointId: String, remoteName: String, error: Exception) {
-        when (val statusCode = error.asNearbyStatusCode()) {
+        val statusCode = error.asNearbyStatusCode()
+        when (statusCode) {
             ConnectionsStatusCodes.STATUS_RADIO_ERROR,
             ConnectionsStatusCodes.STATUS_OUT_OF_ORDER_API_CALL,
             ConnectionsStatusCodes.STATUS_ALREADY_CONNECTED_TO_ENDPOINT, -> {

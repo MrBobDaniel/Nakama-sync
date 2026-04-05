@@ -516,6 +516,12 @@ private final class NearbyAudioController {
     channels: 1,
     interleaved: false
   )!
+  private let playbackFormat = AVAudioFormat(
+    commonFormat: .pcmFormatFloat32,
+    sampleRate: 16_000,
+    channels: 1,
+    interleaved: false
+  )!
 
   private var captureConverter: AVAudioConverter?
   private var outboundEndpoint: EndpointID?
@@ -669,7 +675,7 @@ private final class NearbyAudioController {
     }
 
     audioEngine.attach(playerNode)
-    audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: captureFormat)
+    audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
     isConfigured = true
   }
 
@@ -755,16 +761,25 @@ private final class NearbyAudioController {
     guard
       sampleCount > 0,
       let playbackBuffer = AVAudioPCMBuffer(
-        pcmFormat: captureFormat,
+        pcmFormat: playbackFormat,
         frameCapacity: AVAudioFrameCount(sampleCount)
       ),
-      let channelData = playbackBuffer.int16ChannelData
+      let channelData = playbackBuffer.floatChannelData
     else {
       return
     }
 
     playbackBuffer.frameLength = AVAudioFrameCount(sampleCount)
-    data.copyBytes(to: UnsafeMutableBufferPointer(start: channelData[0], count: sampleCount))
+    data.withUnsafeBytes { rawBuffer in
+      guard let samples = rawBuffer.bindMemory(to: Int16.self).baseAddress else {
+        return
+      }
+
+      let output = channelData[0]
+      for index in 0..<sampleCount {
+        output[index] = Float(samples[index]) / Float(Int16.max)
+      }
+    }
 
     audioQueue.async { [weak self] in
       guard let self else {
