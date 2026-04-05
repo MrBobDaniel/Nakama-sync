@@ -348,20 +348,21 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
 
 private extension NearbyConnectionsBridge {
   func sendHandshake(to endpointID: EndpointID) {
+    let handshake: [String: Any] = [
+      "type": "hello",
+      "roomId": roomID as Any,
+      "displayName": displayName,
+    ]
     guard
       let handshakeData = try? JSONSerialization.data(
-        withJSONObject: [
-          "type": "hello",
-          "roomId": roomID ?? NSNull(),
-          "displayName": displayName,
-        ]
+        withJSONObject: handshake
       )
     else {
       emit(event: "error", message: "Failed to encode Nearby peer metadata.")
       return
     }
 
-    connectionManager.send(handshakeData, to: endpointID)
+    connectionManager.send(handshakeData, to: [endpointID])
   }
 
   func handleHandshakePayload(_ data: Data, from endpointID: EndpointID) -> Bool {
@@ -412,19 +413,7 @@ private extension NearbyConnectionsBridge {
   }
 
   func disconnect(_ endpointID: EndpointID) {
-    if connectionManager.responds(to: NSSelectorFromString("disconnectFromEndpoint:")) {
-      _ = connectionManager.perform(NSSelectorFromString("disconnectFromEndpoint:"), with: endpointID)
-      return
-    }
-
-    if connectionManager.responds(to: NSSelectorFromString("disconnectFromEndpointID:")) {
-      _ = connectionManager.perform(NSSelectorFromString("disconnectFromEndpointID:"), with: endpointID)
-      return
-    }
-
-    if connectionManager.responds(to: NSSelectorFromString("disconnectFrom:")) {
-      _ = connectionManager.perform(NSSelectorFromString("disconnectFrom:"), with: endpointID)
-    }
+    connectionManager.disconnect(from: [endpointID])
   }
 }
 #endif
@@ -472,7 +461,7 @@ private final class NearbyAudioController {
     outboundInputStream?.open()
     outboundOutputStream?.open()
 
-    connectionManager.startStream(streams.input, to: endpointID)
+    connectionManager.startStream(streams.input, to: [endpointID])
 
     let inputNode = audioEngine.inputNode
     let inputFormat = inputNode.outputFormat(forBus: 0)
