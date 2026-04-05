@@ -1,13 +1,18 @@
 package com.example.app
 
 import android.Manifest
+import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import androidx.core.content.ContextCompat
 import com.google.android.gms.common.ConnectionResult
@@ -38,6 +43,7 @@ import org.json.JSONObject
 class NearbyConnectionsBridge(
     private val context: Context,
 ) : MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
+    private val activity = context as? Activity
     private val strategy = Strategy.P2P_POINT_TO_POINT
     private val serviceId = "com.example.app.walkie"
     private val connectionsClient: ConnectionsClient = Nearby.getConnectionsClient(context)
@@ -51,6 +57,7 @@ class NearbyConnectionsBridge(
     private var roomId: String? = null
     private var displayName: String = "Nakama Android"
     private var currentAudioStreamer: AudioStreamer? = null
+    private var pendingStartSessionResult: MethodChannel.Result? = null
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
@@ -91,7 +98,32 @@ class NearbyConnectionsBridge(
 
     fun dispose() {
         stopSession()
+        pendingStartSessionResult?.error("cancelled", "Nearby session setup was cancelled.", null)
+        pendingStartSessionResult = null
         executor.shutdownNow()
+    }
+
+    fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (requestCode != REQUEST_PERMISSIONS_CODE) {
+            return
+        }
+
+        val pendingResult = pendingStartSessionResult ?: return
+        pendingStartSessionResult = null
+
+        val allGranted = grantResults.isNotEmpty() &&
+            grantResults.all { result -> result == PackageManager.PERMISSION_GRANTED }
+        if (!allGranted) {
+            emit("unsupported", "Nearby Connections requires Bluetooth, nearby devices, location, and microphone permissions.")
+            pendingResult.error("missing_permissions", "Nearby Connections permissions are missing.", null)
+            return
+        }
+
+        startSession(pendingResult)
     }
 
     private fun startSession(result: MethodChannel.Result) {
@@ -101,9 +133,18 @@ class NearbyConnectionsBridge(
             return
         }
 
-        if (!hasRequiredPermissions()) {
-            emit("unsupported", "Nearby Connections requires Bluetooth, nearby devices, location, and microphone permissions.")
-            result.error("missing_permissions", "Nearby Connections permissions are missing.", null)
+        val missingPermissions = getMissingPermissions()
+        if (missingPermissions.isNotEmpty()) {
+            val currentActivity = activity
+            if (currentActivity == null) {
+                emit("unsupported", "Nearby Connections permissions are missing and no Activity is available to request them.")
+                result.error("missing_permissions", "Nearby Connections permissions are missing.", null)
+                return
+            }
+
+            pendingStartSessionResult?.error("cancelled", "Nearby session setup was superseded by a new permission request.", null)
+            pendingStartSessionResult = result
+            currentActivity.requestPermissions(missingPermissions.toTypedArray(), REQUEST_PERMISSIONS_CODE)
             return
         }
 
@@ -139,16 +180,17 @@ class NearbyConnectionsBridge(
     }
 
     private fun setPushToTalkActive(isActive: Boolean, result: MethodChannel.Result) {
-        val endpointId = activeEndpoints.firstOrNull()
+        val endpointId = activeEndpoints.firstOrNull { endpointRoomMatches[it] == true }
         if (endpointId == null) {
-            emit("error", "No active Nearby peer is connected.")
-            result.error("no_endpoint", "No active Nearby peer is connected.", null)
+            emit("error", "No validated Nearby peer is connected.")
+            result.error("no_endpoint", "No validated Nearby peer is connected.", null)
             return
         }
 
         if (isActive) {
             if (currentAudioStreamer == null) {
                 currentAudioStreamer = AudioStreamer(
+                    context = context,
                     connectionsClient = connectionsClient,
                     endpointId = endpointId,
                     onEnded = {
@@ -186,7 +228,7 @@ class NearbyConnectionsBridge(
         return status == ConnectionResult.SUCCESS
     }
 
-    private fun hasRequiredPermissions(): Boolean {
+    private fun getMissingPermissions(): List<String> {
         val permissions = buildList {
             add(Manifest.permission.ACCESS_FINE_LOCATION)
             add(Manifest.permission.RECORD_AUDIO)
@@ -200,8 +242,8 @@ class NearbyConnectionsBridge(
             }
         }
 
-        return permissions.all { permission ->
-            ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+        return permissions.filter { permission ->
+            ContextCompat.checkSelfPermission(context, permission) != PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -257,7 +299,7 @@ class NearbyConnectionsBridge(
                     emit("connected", "Connected to nearby peer over Nearby Connections.")
                 }
 
-                com.google.android.gms.common.api.CommonStatusCodes.CONNECTION_REJECTED -> {
+                com.google.android.gms.nearby.connection.ConnectionsStatusCodes.STATUS_CONNECTION_REJECTED -> {
                     emit("error", "Nearby peer rejected the connection.")
                 }
 
@@ -277,6 +319,10 @@ class NearbyConnectionsBridge(
         override fun onPayloadReceived(endpointId: String, payload: Payload) {
             when (payload.type) {
                 Payload.Type.STREAM -> {
+                    if (endpointRoomMatches[endpointId] != true) {
+                        emit("error", "Ignoring audio stream from unverified nearby peer.")
+                        return
+                    }
                     receivedStreams[payload.id] = payload
                     emit("stream_received", "Incoming audio stream received from nearby peer.")
                     playIncomingStream(payload)
@@ -395,20 +441,35 @@ class NearbyConnectionsBridge(
     }
 
     private class AudioStreamer(
+        private val context: Context,
         private val connectionsClient: ConnectionsClient,
         private val endpointId: String,
         private val onEnded: () -> Unit,
     ) {
         private val isRunning = AtomicBoolean(false)
         private val executor = Executors.newSingleThreadExecutor()
+        private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
         private var audioRecord: AudioRecord? = null
         private var payload: Payload? = null
+        private var previousMode: Int? = null
+        private var previousSpeakerphoneState: Boolean? = null
+        private var previousMicrophoneMuteState: Boolean? = null
+        private var noiseSuppressor: NoiseSuppressor? = null
+        private var acousticEchoCanceler: AcousticEchoCanceler? = null
+        private var automaticGainControl: AutomaticGainControl? = null
 
         fun start() {
             if (!isRunning.compareAndSet(false, true)) {
                 return
             }
+
+            previousMode = audioManager.mode
+            previousSpeakerphoneState = audioManager.isSpeakerphoneOn
+            previousMicrophoneMuteState = audioManager.isMicrophoneMute
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = true
+            audioManager.isMicrophoneMute = false
 
             val minBufferSize = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
@@ -424,6 +485,7 @@ class NearbyConnectionsBridge(
                 minBufferSize.coerceAtLeast(SAMPLE_BUFFER_BYTES),
             )
             audioRecord = record
+            attachVoiceEffects(record.audioSessionId)
 
             val pipe = android.os.ParcelFileDescriptor.createPipe()
             val input = android.os.ParcelFileDescriptor.AutoCloseInputStream(pipe[0])
@@ -463,15 +525,46 @@ class NearbyConnectionsBridge(
                 audioRecord?.stop()
             } catch (_: Exception) {
             }
+            noiseSuppressor?.release()
+            acousticEchoCanceler?.release()
+            automaticGainControl?.release()
+            noiseSuppressor = null
+            acousticEchoCanceler = null
+            automaticGainControl = null
             audioRecord?.release()
             audioRecord = null
             payload = null
+            previousMode?.let { audioManager.mode = it }
+            previousSpeakerphoneState?.let { audioManager.isSpeakerphoneOn = it }
+            previousMicrophoneMuteState?.let { audioManager.isMicrophoneMute = it }
+            previousMode = null
+            previousSpeakerphoneState = null
+            previousMicrophoneMuteState = null
             executor.shutdownNow()
             onEnded()
+        }
+
+        private fun attachVoiceEffects(audioSessionId: Int) {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(audioSessionId)?.also { effect ->
+                    effect.enabled = true
+                }
+            }
+            if (AcousticEchoCanceler.isAvailable()) {
+                acousticEchoCanceler = AcousticEchoCanceler.create(audioSessionId)?.also { effect ->
+                    effect.enabled = true
+                }
+            }
+            if (AutomaticGainControl.isAvailable()) {
+                automaticGainControl = AutomaticGainControl.create(audioSessionId)?.also { effect ->
+                    effect.enabled = true
+                }
+            }
         }
     }
 
     companion object {
+        private const val REQUEST_PERMISSIONS_CODE = 3_101
         private const val SAMPLE_RATE = 16_000
         private const val SAMPLE_BUFFER_BYTES = 2_048
     }

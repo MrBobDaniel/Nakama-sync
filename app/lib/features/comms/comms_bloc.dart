@@ -54,8 +54,17 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       return;
     }
 
-    await _transportService.setPushToTalkActive(event.isActive);
-    emit(currentState.copyWith(isTransmitting: event.isActive));
+    try {
+      await _transportService.setPushToTalkActive(event.isActive);
+      emit(currentState.copyWith(isTransmitting: event.isActive));
+    } catch (error) {
+      emit(
+        currentState.copyWith(
+          isTransmitting: false,
+          statusMessage: error.toString(),
+        ),
+      );
+    }
   }
 
   Future<void> _onTransportStatusChanged(

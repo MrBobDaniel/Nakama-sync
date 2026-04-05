@@ -1,5 +1,6 @@
 package com.example.app
 
+import android.content.pm.PackageManager
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.plugin.common.EventChannel
@@ -29,5 +30,18 @@ class MainActivity : FlutterActivity() {
         nearbyConnectionsBridge?.dispose()
         nearbyConnectionsBridge = null
         super.onDestroy()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        nearbyConnectionsBridge?.onRequestPermissionsResult(
+            requestCode = requestCode,
+            permissions = permissions,
+            grantResults = grantResults,
+        )
     }
 }
