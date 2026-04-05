@@ -1,0 +1,55 @@
+name: iOS Build Artifact
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-ios-artifact:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Install Dart and Flutter dependencies
+        run: flutter pub get
+
+      - name: Resolve iOS Swift packages
+        run: xcodebuild -resolvePackageDependencies -project ios/Runner.xcodeproj
+
+      - name: Install CocoaPods dependencies
+        run: |
+          cd ios
+          pod install
+
+      - name: Build unsigned iOS release app
+        run: flutter build ios --release --no-codesign
+
+      - name: Package Runner.ipa
+        run: |
+          rm -rf build/ios/ipa Payload
+          mkdir -p Payload build/ios/ipa
+          cp -R build/ios/iphoneos/Runner.app Payload/Runner.app
+          zip -r build/ios/ipa/Runner.ipa Payload
+
+      - name: Upload Runner.ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runner-ipa
+          path: app/build/ios/ipa/Runner.ipa
+          if-no-files-found: error
