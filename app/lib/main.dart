@@ -30,12 +30,14 @@ void main() {
   final CommsTransportService commsTransportService =
       NearbyConnectionsService();
 
-  runApp(NakamaApp(
-    appConfig: appConfig,
-    musicRepository: musicRepository,
-    audioEngine: audioEngine,
-    commsTransportService: commsTransportService,
-  ));
+  runApp(
+    NakamaApp(
+      appConfig: appConfig,
+      musicRepository: musicRepository,
+      audioEngine: audioEngine,
+      commsTransportService: commsTransportService,
+    ),
+  );
 }
 
 class NakamaApp extends StatelessWidget {
@@ -53,29 +55,26 @@ class NakamaApp extends StatelessWidget {
   });
 
   GoRouter get _router => GoRouter(
-        initialLocation: '/music',
+    initialLocation: '/music',
+    routes: [
+      GoRoute(
+        path: '/music',
+        builder: (context, state) => appConfig.hasMusicConfig
+            ? const MusicLibraryScreen()
+            : const MusicConfigurationRequiredScreen(),
         routes: [
           GoRoute(
-            path: '/music',
-            builder: (context, state) => appConfig.hasMusicConfig
-                ? const MusicLibraryScreen()
-                : const MusicConfigurationRequiredScreen(),
-            routes: [
-              GoRoute(
-                path: ':playlistId',
-                builder: (context, state) => PlaylistDetailScreen(
-                  playlistId: state.pathParameters['playlistId']!,
-                  musicRepository: musicRepository,
-                ),
-              ),
-            ],
-          ),
-          GoRoute(
-            path: '/comms',
-            builder: (context, state) => const CommsScreen(),
+            path: ':playlistId',
+            builder: (context, state) => PlaylistDetailScreen(
+              playlistId: state.pathParameters['playlistId']!,
+              musicRepository: musicRepository,
+            ),
           ),
         ],
-      );
+      ),
+      GoRoute(path: '/comms', builder: (context, state) => const CommsScreen()),
+    ],
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -96,16 +95,14 @@ class NakamaApp extends StatelessWidget {
     return MultiBlocProvider(
       providers: [
         BlocProvider<CommsBloc>(
-            create: (context) => CommsBloc(
-              transportService: commsTransportService,
-            ),
+          create: (context) =>
+              CommsBloc(transportService: commsTransportService),
         ),
         if (appConfig.hasMusicConfig)
           BlocProvider<MusicBloc>(
-            create: (context) => MusicBloc(
-              repository: musicRepository,
-              audioEngine: audioEngine,
-            )..add(LoadPlaylistsEvent()),
+            create: (context) =>
+                MusicBloc(repository: musicRepository, audioEngine: audioEngine)
+                  ..add(LoadPlaylistsEvent()),
           ),
       ],
       child: Builder(
@@ -116,17 +113,12 @@ class NakamaApp extends StatelessWidget {
 
           return BlocListener<CommsBloc, CommsState>(
             listenWhen: (previous, current) {
-              final wasTransmitting =
-                  previous is CommsConnected && previous.isTransmitting;
-              final isTransmitting =
-                  current is CommsConnected && current.isTransmitting;
-              return wasTransmitting != isTransmitting;
+              return previous.isSpeechActive != current.isSpeechActive;
             },
             listener: (context, state) {
-              final targetVolume =
-                  state is CommsConnected && state.isTransmitting
-                      ? AudioEngine.duckedVolume
-                      : AudioEngine.defaultVolume;
+              final targetVolume = state.isSpeechActive
+                  ? AudioEngine.duckedVolume
+                  : AudioEngine.defaultVolume;
               audioEngine.setVolume(targetVolume);
             },
             child: app,
@@ -159,7 +151,11 @@ class MusicConfigurationRequiredScreen extends StatelessWidget {
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(Icons.settings_input_component, size: 56, color: Colors.white70),
+              Icon(
+                Icons.settings_input_component,
+                size: 56,
+                color: Colors.white70,
+              ),
               SizedBox(height: 16),
               Text(
                 'Music service is not configured.',

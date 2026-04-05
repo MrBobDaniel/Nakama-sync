@@ -596,6 +596,11 @@ private final class NearbyAudioController {
           self?.schedulePlayback(for: data)
         },
         onFinished: { [weak self] in
+          self?.eventHandler(
+            "receive_state",
+            "Incoming voice audio is idle.",
+            ["isReceivingAudio": false]
+          )
           self?.inboundReaders.removeValue(forKey: endpointID)
           self?.tearDownAudioIfIdle()
         }
@@ -612,6 +617,11 @@ private final class NearbyAudioController {
         playerNode.play()
       }
 
+      eventHandler(
+        "receive_state",
+        "Receiving nearby voice audio.",
+        ["isReceivingAudio": true]
+      )
       reader.start()
     } catch {
       eventHandler("error", error.localizedDescription, [:])
@@ -642,6 +652,7 @@ private final class NearbyAudioController {
         .defaultToSpeaker,
         .allowBluetooth,
         .allowBluetoothA2DP,
+        .duckOthers,
       ]
     )
     try session.setPreferredSampleRate(16_000)

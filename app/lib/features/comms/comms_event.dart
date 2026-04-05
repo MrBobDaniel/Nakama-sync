@@ -29,6 +29,15 @@ class PushToTalkChanged extends CommsEvent {
   List<Object?> get props => [isActive];
 }
 
+class MicrophoneMuteChanged extends CommsEvent {
+  const MicrophoneMuteChanged(this.isMuted);
+
+  final bool isMuted;
+
+  @override
+  List<Object?> get props => [isMuted];
+}
+
 class TransportStatusChanged extends CommsEvent {
   const TransportStatusChanged(this.payload);
 

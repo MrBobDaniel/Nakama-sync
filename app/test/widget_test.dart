@@ -16,6 +16,7 @@ import 'package:mocktail/mocktail.dart';
 class MockMusicRepository extends Mock implements MusicRepository {}
 
 class MockAudioEngine extends Mock implements AudioEngine {}
+
 class MockCommsTransportService extends Mock implements CommsTransportService {}
 
 class FakeSong extends Fake implements Song {}
@@ -30,7 +31,9 @@ void main() {
     final audioEngine = MockAudioEngine();
     final transportService = MockCommsTransportService();
 
-    when(() => repository.fetchPlaylists()).thenAnswer((_) async => const <Playlist>[]);
+    when(
+      () => repository.fetchPlaylists(),
+    ).thenAnswer((_) async => const <Playlist>[]);
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
     when(() => transportService.dispose()).thenAnswer((_) async {});
@@ -77,7 +80,9 @@ void main() {
       coverArtUrl: 'https://example.com/cover',
     );
 
-    when(() => repository.fetchPlaylists()).thenAnswer((_) async => const [playlist]);
+    when(
+      () => repository.fetchPlaylists(),
+    ).thenAnswer((_) async => const [playlist]);
     when(() => repository.fetchPlaylistDetails('gym-favorites')).thenAnswer(
       (_) async => const Playlist(
         id: 'gym-favorites',
@@ -120,7 +125,9 @@ void main() {
     final audioEngine = MockAudioEngine();
     final transportService = MockCommsTransportService();
 
-    when(() => repository.fetchPlaylists()).thenAnswer((_) async => const <Playlist>[]);
+    when(
+      () => repository.fetchPlaylists(),
+    ).thenAnswer((_) async => const <Playlist>[]);
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
     when(() => transportService.dispose()).thenAnswer((_) async {});
@@ -157,13 +164,19 @@ void main() {
     final transportEvents = StreamController<Map<String, dynamic>>.broadcast();
     final transportService = MockCommsTransportService();
 
-    when(() => repository.fetchPlaylists()).thenAnswer((_) async => const <Playlist>[]);
+    when(
+      () => repository.fetchPlaylists(),
+    ).thenAnswer((_) async => const <Playlist>[]);
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
     when(() => transportService.dispose()).thenAnswer((_) async {});
     when(() => transportService.initialize(any())).thenAnswer((_) async {});
-    when(() => transportService.setPushToTalkActive(any())).thenAnswer((_) async {});
-    when(() => transportService.events).thenAnswer((_) => transportEvents.stream);
+    when(
+      () => transportService.setPushToTalkActive(any()),
+    ).thenAnswer((_) async {});
+    when(
+      () => transportService.events,
+    ).thenAnswer((_) => transportEvents.stream);
 
     await tester.pumpWidget(
       NakamaApp(
@@ -201,8 +214,163 @@ void main() {
     await tester.pumpAndSettle();
 
     verify(() => audioEngine.setVolume(AudioEngine.duckedVolume)).called(1);
-    verify(() => audioEngine.setVolume(AudioEngine.defaultVolume))
-        .called(greaterThanOrEqualTo(1));
+    verify(
+      () => audioEngine.setVolume(AudioEngine.defaultVolume),
+    ).called(greaterThanOrEqualTo(1));
+
+    await transportEvents.close();
+  });
+
+  testWidgets('ducks music volume while incoming comms audio is active', (
+    WidgetTester tester,
+  ) async {
+    final repository = MockMusicRepository();
+    final audioEngine = MockAudioEngine();
+    final transportEvents = StreamController<Map<String, dynamic>>.broadcast();
+    final transportService = MockCommsTransportService();
+
+    when(
+      () => repository.fetchPlaylists(),
+    ).thenAnswer((_) async => const <Playlist>[]);
+    when(() => audioEngine.dispose()).thenAnswer((_) async {});
+    when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
+    when(() => transportService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.initialize(any())).thenAnswer((_) async {});
+    when(
+      () => transportService.setPushToTalkActive(any()),
+    ).thenAnswer((_) async {});
+    when(
+      () => transportService.events,
+    ).thenAnswer((_) => transportEvents.stream);
+
+    await tester.pumpWidget(
+      NakamaApp(
+        appConfig: const AppConfig(
+          navidromeBaseUrl: 'http://localhost:4533',
+          navidromeUsername: 'tester',
+          navidromePassword: 'secret',
+          signalingServerUrl: 'http://localhost:3000',
+        ),
+        musicRepository: repository,
+        audioEngine: audioEngine,
+        commsTransportService: transportService,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Walkie-Talkie'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Open Room'));
+    await tester.pump();
+
+    transportEvents.add(const {
+      'event': 'connected',
+      'roomId': 'gym-floor',
+      'connectedPeers': 1,
+      'message': 'Connected over Nearby Connections.',
+    });
+    await tester.pump();
+
+    transportEvents.add(const {
+      'event': 'receive_state',
+      'roomId': 'gym-floor',
+      'connectedPeers': 1,
+      'message': 'Receiving nearby voice audio.',
+      'isReceivingAudio': true,
+    });
+    await tester.pumpAndSettle();
+
+    transportEvents.add(const {
+      'event': 'receive_state',
+      'roomId': 'gym-floor',
+      'connectedPeers': 1,
+      'message': 'Incoming voice audio is idle.',
+      'isReceivingAudio': false,
+    });
+    await tester.pumpAndSettle();
+
+    verify(() => audioEngine.setVolume(AudioEngine.duckedVolume)).called(1);
+    verify(
+      () => audioEngine.setVolume(AudioEngine.defaultVolume),
+    ).called(greaterThanOrEqualTo(1));
+
+    await transportEvents.close();
+  });
+
+  testWidgets('broadcast button toggles on tap and holds on long press', (
+    WidgetTester tester,
+  ) async {
+    final repository = MockMusicRepository();
+    final audioEngine = MockAudioEngine();
+    final transportEvents = StreamController<Map<String, dynamic>>.broadcast();
+    final transportService = MockCommsTransportService();
+
+    when(
+      () => repository.fetchPlaylists(),
+    ).thenAnswer((_) async => const <Playlist>[]);
+    when(() => audioEngine.dispose()).thenAnswer((_) async {});
+    when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
+    when(() => transportService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.initialize(any())).thenAnswer((_) async {});
+    when(
+      () => transportService.setPushToTalkActive(any()),
+    ).thenAnswer((_) async {});
+    when(
+      () => transportService.events,
+    ).thenAnswer((_) => transportEvents.stream);
+
+    await tester.pumpWidget(
+      NakamaApp(
+        appConfig: const AppConfig(
+          navidromeBaseUrl: 'http://localhost:4533',
+          navidromeUsername: 'tester',
+          navidromePassword: 'secret',
+          signalingServerUrl: 'http://localhost:3000',
+        ),
+        musicRepository: repository,
+        audioEngine: audioEngine,
+        commsTransportService: transportService,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Walkie-Talkie'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Open Room'));
+    await tester.pump();
+
+    transportEvents.add(const {
+      'event': 'connected',
+      'roomId': 'gym-floor',
+      'connectedPeers': 1,
+      'message': 'Connected over Nearby Connections.',
+    });
+    await tester.pumpAndSettle();
+
+    final broadcastFinder = find.text('Broadcast');
+    await tester.ensureVisible(broadcastFinder);
+    await tester.tap(broadcastFinder);
+    await tester.pumpAndSettle();
+    expect(find.text('Broadcasting'), findsOneWidget);
+    await tester.tap(find.text('Broadcasting'));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(broadcastFinder);
+    final gesture = await tester.startGesture(
+      tester.getCenter(broadcastFinder),
+    );
+    await tester.pump(const Duration(milliseconds: 700));
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    verify(
+      () => transportService.setPushToTalkActive(true),
+    ).called(greaterThanOrEqualTo(2));
+    verify(
+      () => transportService.setPushToTalkActive(false),
+    ).called(greaterThanOrEqualTo(2));
 
     await transportEvents.close();
   });

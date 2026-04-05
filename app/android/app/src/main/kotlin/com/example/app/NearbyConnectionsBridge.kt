@@ -2,9 +2,11 @@ package com.example.app
 
 import android.Manifest
 import android.app.Activity
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -19,6 +21,8 @@ import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
+import com.google.android.gms.common.api.ApiException
+import com.google.android.gms.common.api.CommonStatusCodes
 import com.google.android.gms.nearby.Nearby
 import com.google.android.gms.nearby.connection.AdvertisingOptions
 import com.google.android.gms.nearby.connection.ConnectionInfo
@@ -28,6 +32,7 @@ import com.google.android.gms.nearby.connection.ConnectionsClient
 import com.google.android.gms.nearby.connection.DiscoveredEndpointInfo
 import com.google.android.gms.nearby.connection.DiscoveryOptions
 import com.google.android.gms.nearby.connection.EndpointDiscoveryCallback
+import com.google.android.gms.nearby.connection.ConnectionsStatusCodes
 import com.google.android.gms.nearby.connection.Payload
 import com.google.android.gms.nearby.connection.PayloadCallback
 import com.google.android.gms.nearby.connection.PayloadTransferUpdate
@@ -40,6 +45,7 @@ import java.io.BufferedOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import android.net.wifi.WifiManager
 import org.json.JSONObject
 
 class NearbyConnectionsBridge(
@@ -51,10 +57,13 @@ class NearbyConnectionsBridge(
     private val connectionsClient: ConnectionsClient = Nearby.getConnectionsClient(context)
     private val executor = Executors.newCachedThreadPool()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val audioFocusController = AudioFocusController(context)
     private val activeEndpoints = linkedSetOf<String>()
     private val discoveredEndpoints = ConcurrentHashMap.newKeySet<String>()
     private val receivedStreams = ConcurrentHashMap<Long, Payload>()
     private val endpointRoomMatches = ConcurrentHashMap<String, Boolean>()
+    private val pendingOutgoingConnections = ConcurrentHashMap.newKeySet<String>()
+    private val pendingConnectionRequests = ConcurrentHashMap<String, Runnable>()
 
     private var eventSink: EventChannel.EventSink? = null
     private var roomId: String? = null
@@ -189,6 +198,7 @@ class NearbyConnectionsBridge(
                     context = context,
                     connectionsClient = connectionsClient,
                     endpointId = endpointId,
+                    audioFocusController = audioFocusController,
                     onEnded = {
                         currentAudioStreamer = null
                         emit("transmit_state", "Push-to-talk stream ended.", mapOf("isTransmitting" to false))
@@ -214,6 +224,9 @@ class NearbyConnectionsBridge(
         discoveredEndpoints.clear()
         receivedStreams.clear()
         endpointRoomMatches.clear()
+        pendingOutgoingConnections.clear()
+        pendingConnectionRequests.values.forEach(mainHandler::removeCallbacks)
+        pendingConnectionRequests.clear()
         discoveryStopRunnable?.let(mainHandler::removeCallbacks)
         discoveryStopRunnable = null
         isDiscovering = false
@@ -229,8 +242,10 @@ class NearbyConnectionsBridge(
 
     private fun getMissingPermissions(): List<String> {
         val permissions = buildList {
-            add(Manifest.permission.ACCESS_FINE_LOCATION)
             add(Manifest.permission.RECORD_AUDIO)
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.S_V2) {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 add(Manifest.permission.BLUETOOTH_SCAN)
                 add(Manifest.permission.BLUETOOTH_CONNECT)
@@ -264,7 +279,7 @@ class NearbyConnectionsBridge(
                 return
             }
 
-            if (activeEndpoints.isNotEmpty()) {
+            if (activeEndpoints.isNotEmpty() || pendingOutgoingConnections.contains(endpointId)) {
                 return
             }
 
@@ -275,16 +290,11 @@ class NearbyConnectionsBridge(
 
             val remoteName = remoteEndpoint.displayName ?: info.endpointName
             emit("peer_discovered", "Found nearby peer ${remoteName.ifBlank { "in this room" }}.")
-            connectionsClient.requestConnection(
-                localEndpointInfo(),
-                endpointId,
-                connectionLifecycleCallback,
-            ).addOnFailureListener { error ->
-                emit("error", "Failed to request connection: ${error.localizedMessage ?: "unknown error"}")
-            }
+            scheduleConnectionRequest(endpointId, remoteName)
         }
 
         override fun onEndpointLost(endpointId: String) {
+            cancelPendingConnectionRequest(endpointId)
             discoveredEndpoints.remove(endpointId)
             if (activeEndpoints.remove(endpointId)) {
                 emit("disconnected", "Nearby peer left range. Room remains open for reconnects.")
@@ -295,6 +305,7 @@ class NearbyConnectionsBridge(
 
     private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
+            cancelPendingConnectionRequest(endpointId)
             val remoteEndpoint = parseEndpointInfo(info.endpointInfo)
             if (!roomMatches(remoteEndpoint.roomId)) {
                 endpointRoomMatches[endpointId] = false
@@ -311,25 +322,30 @@ class NearbyConnectionsBridge(
         }
 
         override fun onConnectionResult(endpointId: String, resolution: ConnectionResolution) {
+            cancelPendingConnectionRequest(endpointId)
             when (resolution.status.statusCode) {
-                com.google.android.gms.common.api.CommonStatusCodes.SUCCESS -> {
+                CommonStatusCodes.SUCCESS -> {
                     activeEndpoints.add(endpointId)
                     stopDiscovery()
                     sendHandshake(endpointId)
                     emit("connected", "Connected to nearby peer over Nearby Connections.")
                 }
 
-                com.google.android.gms.nearby.connection.ConnectionsStatusCodes.STATUS_CONNECTION_REJECTED -> {
+                ConnectionsStatusCodes.STATUS_CONNECTION_REJECTED -> {
                     emit("error", "Nearby peer rejected the connection.")
                 }
 
                 else -> {
-                    emit("error", "Nearby connection failed with status ${resolution.status.statusCode}.")
+                    emit(
+                        "error",
+                        "Nearby connection failed: ${debugStatusLabel(resolution.status.statusCode)}.",
+                    )
                 }
             }
         }
 
         override fun onDisconnected(endpointId: String) {
+            cancelPendingConnectionRequest(endpointId)
             activeEndpoints.remove(endpointId)
             endpointRoomMatches.remove(endpointId)
             emit("disconnected", "Nearby peer disconnected. Room remains open for new connections.")
@@ -375,6 +391,8 @@ class NearbyConnectionsBridge(
     private fun playIncomingStream(payload: Payload) {
         executor.execute {
             val inputStream = payload.asStream()?.asInputStream() ?: return@execute
+            audioFocusController.acquire()
+            emit("receive_state", "Receiving nearby voice audio.", mapOf("isReceivingAudio" to true))
             val minBufferSize = AudioTrack.getMinBufferSize(
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_OUT_MONO,
@@ -414,6 +432,8 @@ class NearbyConnectionsBridge(
                 bufferedInput.close()
                 audioTrack.stop()
                 audioTrack.release()
+                audioFocusController.release()
+                emit("receive_state", "Incoming voice audio is idle.", mapOf("isReceivingAudio" to false))
             }
         }
     }
@@ -535,6 +555,109 @@ class NearbyConnectionsBridge(
         connectionsClient.stopDiscovery()
     }
 
+    private fun scheduleConnectionRequest(endpointId: String, remoteName: String) {
+        if (activeEndpoints.isNotEmpty() || pendingOutgoingConnections.contains(endpointId)) {
+            return
+        }
+
+        val runnable = Runnable {
+            pendingConnectionRequests.remove(endpointId)
+            if (activeEndpoints.isNotEmpty() || !discoveredEndpoints.contains(endpointId)) {
+                return@Runnable
+            }
+
+            pendingOutgoingConnections.add(endpointId)
+            connectionsClient.requestConnection(
+                localEndpointInfo(),
+                endpointId,
+                connectionLifecycleCallback,
+            ).addOnFailureListener { error ->
+                pendingOutgoingConnections.remove(endpointId)
+                discoveredEndpoints.remove(endpointId)
+                handleRequestConnectionFailure(endpointId, remoteName, error)
+            }
+        }
+
+        pendingConnectionRequests[endpointId] = runnable
+        mainHandler.postDelayed(runnable, CONNECTION_REQUEST_DELAY_MILLIS)
+    }
+
+    private fun cancelPendingConnectionRequest(endpointId: String) {
+        pendingOutgoingConnections.remove(endpointId)
+        pendingConnectionRequests.remove(endpointId)?.let(mainHandler::removeCallbacks)
+    }
+
+    private fun handleRequestConnectionFailure(endpointId: String, remoteName: String, error: Exception) {
+        when (val statusCode = error.asNearbyStatusCode()) {
+            ConnectionsStatusCodes.STATUS_RADIO_ERROR,
+            ConnectionsStatusCodes.STATUS_OUT_OF_ORDER_API_CALL,
+            ConnectionsStatusCodes.STATUS_ALREADY_CONNECTED_TO_ENDPOINT, -> {
+                emit(
+                    "session_started",
+                    "Nearby dial to ${remoteName.ifBlank { "peer" }} is deferred: ${userFacingStatus(statusCode)} Keeping the room open for inbound connections.",
+                    mapOf("isDiscovering" to isDiscovering),
+                )
+                mainHandler.postDelayed(
+                    { startDiscoveryBurst("Retrying a brief Nearby scan while this room stays open.") },
+                    CONNECTION_RETRY_DELAY_MILLIS,
+                )
+            }
+
+            else -> {
+                emit(
+                    "error",
+                    "Failed to request connection to ${remoteName.ifBlank { "peer" }}: ${userFacingStatus(statusCode)}.",
+                )
+            }
+        }
+
+        if (statusCode == ConnectionsStatusCodes.STATUS_RADIO_ERROR) {
+            emit(
+                "session_started",
+                "Android Nearby radios are not fully ready (${radioStateSummary()}). Waiting for the peer to connect inbound or for the next scan retry.",
+                mapOf("isDiscovering" to isDiscovering),
+            )
+        }
+
+        cancelPendingConnectionRequest(endpointId)
+    }
+
+    private fun Exception.asNearbyStatusCode(): Int {
+        return (this as? ApiException)?.statusCode ?: CommonStatusCodes.ERROR
+    }
+
+    private fun userFacingStatus(statusCode: Int): String {
+        return when (statusCode) {
+            ConnectionsStatusCodes.STATUS_RADIO_ERROR ->
+                "the Android Bluetooth/Wi-Fi radio stack reported an error"
+            ConnectionsStatusCodes.STATUS_OUT_OF_ORDER_API_CALL ->
+                "Nearby was busy with another connection transition"
+            ConnectionsStatusCodes.STATUS_ALREADY_CONNECTED_TO_ENDPOINT ->
+                "the endpoint is already connected"
+            else -> debugStatusLabel(statusCode)
+        }
+    }
+
+    private fun debugStatusLabel(statusCode: Int): String {
+        val debugCode = ConnectionsStatusCodes.getStatusCodeString(statusCode)
+        return "$statusCode ($debugCode)"
+    }
+
+    private fun radioStateSummary(): String {
+        val bluetoothEnabled = runCatching {
+            val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            bluetoothManager?.adapter?.isEnabled
+        }.getOrNull()
+        val wifiEnabled = runCatching {
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            wifiManager?.isWifiEnabled
+        }.getOrNull()
+
+        val bluetoothState = bluetoothEnabled?.let { if (it) "Bluetooth on" else "Bluetooth off" } ?: "Bluetooth unknown"
+        val wifiState = wifiEnabled?.let { if (it) "Wi-Fi on" else "Wi-Fi off" } ?: "Wi-Fi unknown"
+        return "$bluetoothState, $wifiState"
+    }
+
     private data class NearbyEndpointInfo(
         val roomId: String? = null,
         val displayName: String? = null,
@@ -544,6 +667,7 @@ class NearbyConnectionsBridge(
         private val context: Context,
         private val connectionsClient: ConnectionsClient,
         private val endpointId: String,
+        private val audioFocusController: AudioFocusController,
         private val onEnded: () -> Unit,
     ) {
         private val isRunning = AtomicBoolean(false)
@@ -567,6 +691,7 @@ class NearbyConnectionsBridge(
             previousMode = audioManager.mode
             previousSpeakerphoneState = audioManager.isSpeakerphoneOn
             previousMicrophoneMuteState = audioManager.isMicrophoneMute
+            audioFocusController.acquire()
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             audioManager.isSpeakerphoneOn = true
             audioManager.isMicrophoneMute = false
@@ -640,6 +765,7 @@ class NearbyConnectionsBridge(
             previousMode = null
             previousSpeakerphoneState = null
             previousMicrophoneMuteState = null
+            audioFocusController.release()
             executor.shutdownNow()
             onEnded()
         }
@@ -663,10 +789,76 @@ class NearbyConnectionsBridge(
         }
     }
 
+    private class AudioFocusController(
+        context: Context,
+    ) {
+        private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { }
+        private val lock = Any()
+        private var activeUsers = 0
+        private var audioFocusRequest: AudioFocusRequest? = null
+
+        fun acquire() {
+            synchronized(lock) {
+                activeUsers += 1
+                if (activeUsers > 1) {
+                    return
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val request = AudioFocusRequest.Builder(
+                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+                    )
+                        .setOnAudioFocusChangeListener(focusChangeListener)
+                        .setAcceptsDelayedFocusGain(false)
+                        .setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build(),
+                        )
+                        .build()
+                    audioFocusRequest = request
+                    audioManager.requestAudioFocus(request)
+                } else {
+                    @Suppress("DEPRECATION")
+                    audioManager.requestAudioFocus(
+                        focusChangeListener,
+                        AudioManager.STREAM_MUSIC,
+                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+                    )
+                }
+            }
+        }
+
+        fun release() {
+            synchronized(lock) {
+                if (activeUsers == 0) {
+                    return
+                }
+
+                activeUsers -= 1
+                if (activeUsers > 0) {
+                    return
+                }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    audioFocusRequest?.let(audioManager::abandonAudioFocusRequest)
+                    audioFocusRequest = null
+                } else {
+                    @Suppress("DEPRECATION")
+                    audioManager.abandonAudioFocus(focusChangeListener)
+                }
+            }
+        }
+    }
+
     companion object {
         private const val REQUEST_PERMISSIONS_CODE = 3_101
         private const val SAMPLE_RATE = 16_000
         private const val SAMPLE_BUFFER_BYTES = 2_048
         private const val DISCOVERY_WINDOW_MILLIS = 15_000L
+        private const val CONNECTION_REQUEST_DELAY_MILLIS = 1_200L
+        private const val CONNECTION_RETRY_DELAY_MILLIS = 2_000L
     }
 }
