@@ -9,7 +9,10 @@ import UIKit
     let registry = engineBridge.pluginRegistry
     GeneratedPluginRegistrant.register(with: registry)
 
-    let registrar = registry.registrar(forPlugin: "NearbyConnectionsBridge")
+    guard let registrar = registry.registrar(forPlugin: "NearbyConnectionsBridge") else {
+      assertionFailure("NearbyConnectionsBridge registrar is unavailable.")
+      return
+    }
     let messenger = registrar.messenger()
 
     let methodChannel = FlutterMethodChannel(

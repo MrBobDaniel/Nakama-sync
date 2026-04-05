@@ -161,7 +161,6 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     discoverer?.stopDiscovery()
     advertiser = nil
     discoverer = nil
-    connectionManager.stopAllConnections()
     connectedEndpoints.removeAll()
     #endif
   }
@@ -233,12 +232,41 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
 
   func connectionManager(
     _ connectionManager: ConnectionManager,
+    didReceive data: Data,
+    withID payloadID: PayloadID,
+    from endpointID: EndpointID
+  ) {
+    emit(event: "bytes_received", message: "Received control payload from nearby peer.")
+  }
+
+  func connectionManager(
+    _ connectionManager: ConnectionManager,
     didReceive stream: InputStream,
     withID payloadID: PayloadID,
     from endpointID: EndpointID,
     cancellationToken token: CancellationToken
   ) {
     emit(event: "stream_received", message: "Incoming audio stream received from nearby peer.")
+  }
+
+  func connectionManager(
+    _ connectionManager: ConnectionManager,
+    didStartReceivingResourceWithID payloadID: PayloadID,
+    from endpointID: EndpointID,
+    at localURL: URL,
+    withName name: String,
+    cancellationToken token: CancellationToken
+  ) {
+    emit(event: "file_received", message: "Receiving file payload from nearby peer.")
+  }
+
+  func connectionManager(
+    _ connectionManager: ConnectionManager,
+    didReceiveTransferUpdate update: TransferUpdate,
+    from endpointID: EndpointID,
+    forPayload payloadID: PayloadID
+  ) {
+    emit(event: "transfer_update", message: "Nearby payload transfer updated.")
   }
 }
 
