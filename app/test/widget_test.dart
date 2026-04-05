@@ -146,7 +146,7 @@ void main() {
 
     expect(find.text('Walkie-Talkie'), findsOneWidget);
     expect(find.text('Comms Lane'), findsOneWidget);
-    expect(find.text('Join Room'), findsOneWidget);
+    expect(find.text('Open Room'), findsOneWidget);
   });
 
   testWidgets('ducks music volume while push-to-talk is active', (
@@ -183,7 +183,7 @@ void main() {
     await tester.tap(find.byTooltip('Walkie-Talkie'));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Join Room'));
+    await tester.tap(find.text('Open Room'));
     await tester.pump();
 
     transportEvents.add(const {

@@ -18,17 +18,31 @@ class CommsInitial extends CommsState {
   List<Object?> get props => [statusMessage];
 }
 
-class CommsConnecting extends CommsState {
-  const CommsConnecting(
+class CommsSessionOpen extends CommsState {
+  const CommsSessionOpen(
     this.roomId, {
-    this.statusMessage = 'Advertising and discovering via Nearby Connections.',
+    this.statusMessage = 'Room is open for nearby connections.',
+    this.isDiscovering = true,
   });
 
   final String roomId;
   final String statusMessage;
+  final bool isDiscovering;
+
+  CommsSessionOpen copyWith({
+    String? roomId,
+    String? statusMessage,
+    bool? isDiscovering,
+  }) {
+    return CommsSessionOpen(
+      roomId ?? this.roomId,
+      statusMessage: statusMessage ?? this.statusMessage,
+      isDiscovering: isDiscovering ?? this.isDiscovering,
+    );
+  }
 
   @override
-  List<Object?> get props => [roomId, statusMessage];
+  List<Object?> get props => [roomId, statusMessage, isDiscovering];
 }
 
 class CommsConnected extends CommsState {

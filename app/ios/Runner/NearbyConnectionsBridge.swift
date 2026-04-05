@@ -21,6 +21,8 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   private var discoverer: Discoverer?
   private var connectedEndpoints = Set<EndpointID>()
   private var endpointRoomMatches = [EndpointID: Bool]()
+  private var isDiscovering = false
+  private var discoveryStopWorkItem: DispatchWorkItem?
   private lazy var audioController = NearbyAudioController { [weak self] event, message, extra in
     self?.emit(event: event, message: message, extra: extra)
   }
@@ -88,9 +90,13 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     #if canImport(NearbyConnections)
     stopSession()
     connectionManager.delegate = self
-    emit(event: "session_started", message: "Starting Nearby Connections advertising and discovery.")
+    emit(
+      event: "session_started",
+      message: "Opening room and starting Nearby advertising.",
+      extra: ["isDiscovering": true]
+    )
 
-    let context = displayName.data(using: .utf8) ?? Data()
+    let context = endpointContextData()
 
     let advertiser = Advertiser(connectionManager: connectionManager)
     advertiser.delegate = self
@@ -99,8 +105,8 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
 
     let discoverer = Discoverer(connectionManager: connectionManager)
     discoverer.delegate = self
-    discoverer.startDiscovery()
     self.discoverer = discoverer
+    startDiscoveryBurst(message: "Scanning briefly for nearby peers in this room.")
 
     result(nil)
     #else
@@ -204,6 +210,9 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     discoverer = nil
     connectedEndpoints.removeAll()
     endpointRoomMatches.removeAll()
+    discoveryStopWorkItem?.cancel()
+    discoveryStopWorkItem = nil
+    isDiscovering = false
     #endif
   }
 
@@ -212,6 +221,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       "event": event,
       "message": message,
       "roomId": roomID as Any,
+      "isDiscovering": isDiscovering,
     ]
     extra.forEach { payload[$0.key] = $0.value }
     eventSink?(payload)
@@ -244,26 +254,42 @@ extension NearbyConnectionsBridge: AdvertiserDelegate {
     with context: Data,
     connectionRequestHandler: @escaping (Bool) -> Void
   ) {
-    emit(event: "connection_initiated", message: "Connection initiated with nearby peer.")
+    let remoteEndpoint = parseEndpointContext(context)
+    guard roomMatches(remoteEndpoint.roomID) else {
+      endpointRoomMatches[endpointID] = false
+      emit(event: "error", message: "Ignoring Nearby peer from a different room.")
+      connectionRequestHandler(false)
+      return
+    }
+
+    let remoteName = remoteEndpoint.displayName ?? "nearby peer"
+    emit(event: "connection_initiated", message: "Connection initiated with \(remoteName).")
     connectionRequestHandler(true)
   }
 }
 
 extension NearbyConnectionsBridge: DiscovererDelegate {
   func discoverer(_ discoverer: Discoverer, didFind endpointID: EndpointID, with context: Data) {
+    if !connectedEndpoints.isEmpty {
+      return
+    }
+
     if !shouldConnect(to: context) {
       return
     }
 
-    emit(event: "peer_discovered", message: "Found nearby peer.")
-    discoverer.requestConnection(to: endpointID, using: displayName.data(using: .utf8) ?? Data())
+    let remoteEndpoint = parseEndpointContext(context)
+    let remoteName = remoteEndpoint.displayName ?? "nearby peer"
+    emit(event: "peer_discovered", message: "Found nearby peer \(remoteName).")
+    discoverer.requestConnection(to: endpointID, using: endpointContextData())
   }
 
   func discoverer(_ discoverer: Discoverer, didLose endpointID: EndpointID) {
     connectedEndpoints.remove(endpointID)
     endpointRoomMatches.removeValue(forKey: endpointID)
     audioController.handleEndpointDisconnected(endpointID)
-    emit(event: "disconnected", message: "Nearby peer left range. Searching again.")
+    emit(event: "disconnected", message: "Nearby peer left range. Room remains open for reconnects.")
+    startDiscoveryBurst(message: "Peer left range. Scanning briefly for reconnects.")
   }
 }
 
@@ -281,6 +307,7 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
     switch state {
     case .connected:
       connectedEndpoints.insert(endpointID)
+      stopDiscovery()
       sendHandshake(to: endpointID)
       emit(event: "connected", message: "Connected to nearby peer over Nearby Connections.", extra: [
         "connectedPeers": connectedEndpoints.count
@@ -289,7 +316,8 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
       connectedEndpoints.remove(endpointID)
       endpointRoomMatches.removeValue(forKey: endpointID)
       audioController.handleEndpointDisconnected(endpointID)
-      emit(event: "disconnected", message: "Nearby peer disconnected.")
+      emit(event: "disconnected", message: "Nearby peer disconnected. Room remains open for new connections.")
+      startDiscoveryBurst(message: "Peer disconnected. Scanning briefly for another nearby peer.")
     default:
       break
     }
@@ -347,6 +375,15 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
 }
 
 private extension NearbyConnectionsBridge {
+  func endpointContextData() -> Data {
+    let payload: [String: Any] = [
+      "roomId": roomID as Any,
+      "displayName": displayName,
+    ]
+
+    return (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
+  }
+
   func sendHandshake(to endpointID: EndpointID) {
     let handshake: [String: Any] = [
       "type": "hello",
@@ -400,20 +437,68 @@ private extension NearbyConnectionsBridge {
   }
 
   func shouldConnect(to context: Data) -> Bool {
-    guard let remoteName = String(data: context, encoding: .utf8) else {
-      return true
+    roomMatches(parseEndpointContext(context).roomID)
+  }
+
+  func roomMatches(_ peerRoomID: String?) -> Bool {
+    let normalizedRoomID = roomID?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedPeerRoomID = peerRoomID?.trimmingCharacters(in: .whitespacesAndNewlines)
+    return normalizedRoomID == nil || normalizedRoomID?.isEmpty == true || normalizedPeerRoomID == normalizedRoomID
+  }
+
+  func parseEndpointContext(_ context: Data) -> NearbyEndpointContext {
+    guard
+      let json = try? JSONSerialization.jsonObject(with: context) as? [String: Any]
+    else {
+      return NearbyEndpointContext(
+        roomID: nil,
+        displayName: String(data: context, encoding: .utf8)
+      )
     }
 
-    let normalizedRoom = roomID?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-    if normalizedRoom == nil || normalizedRoom?.isEmpty == true {
-      return true
+    return NearbyEndpointContext(
+      roomID: (json["roomId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+      displayName: json["displayName"] as? String
+    )
+  }
+
+  func startDiscoveryBurst(message: String) {
+    guard connectedEndpoints.isEmpty else {
+      return
     }
 
-    return !remoteName.isEmpty
+    discoveryStopWorkItem?.cancel()
+    isDiscovering = true
+    discoverer?.startDiscovery()
+    emit(event: "session_started", message: message, extra: ["isDiscovering": true])
+    scheduleDiscoveryStop()
+  }
+
+  func scheduleDiscoveryStop() {
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.stopDiscovery()
+      self.emit(event: "discovery_idle", message: "Room is open. Listening for incoming connections.")
+    }
+    discoveryStopWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: workItem)
+  }
+
+  func stopDiscovery() {
+    discoveryStopWorkItem?.cancel()
+    discoveryStopWorkItem = nil
+    guard isDiscovering else { return }
+    isDiscovering = false
+    discoverer?.stopDiscovery()
   }
 
   func disconnect(_ endpointID: EndpointID) {
     connectionManager.disconnect(from: endpointID)
+  }
+
+  struct NearbyEndpointContext {
+    let roomID: String?
+    let displayName: String?
   }
 }
 #endif

@@ -50,12 +50,12 @@ class _CommsScreenState extends State<CommsScreen> {
           }
         },
         builder: (context, state) {
-          final isConnecting = state is CommsConnecting;
+          final isRoomOpen = state is CommsSessionOpen;
           final isConnected = state is CommsConnected;
           final isTransmitting =
               state is CommsConnected && state.isTransmitting;
           final roomId = switch (state) {
-            CommsConnecting(:final roomId) => roomId,
+            CommsSessionOpen(:final roomId) => roomId,
             CommsConnected(:final roomId) => roomId,
             _ => _roomController.text.trim(),
           };
@@ -81,7 +81,7 @@ class _CommsScreenState extends State<CommsScreen> {
                       const SizedBox(height: 24),
                       TextField(
                         controller: _roomController,
-                        enabled: !isConnecting && !isConnected,
+                        enabled: !isRoomOpen && !isConnected,
                         decoration: const InputDecoration(
                           labelText: 'Room ID',
                           border: OutlineInputBorder(),
@@ -105,8 +105,13 @@ class _CommsScreenState extends State<CommsScreen> {
                               const SizedBox(height: 8),
                               Text(
                                 switch (state) {
-                                  CommsConnecting(:final statusMessage) =>
-                                    statusMessage,
+                                  CommsSessionOpen(
+                                    :final statusMessage,
+                                    :final isDiscovering,
+                                  ) =>
+                                    isDiscovering
+                                        ? '$statusMessage You can leave this screen while it listens in the background.'
+                                        : '$statusMessage You can keep using the app while this room waits for inbound connections.',
                                   CommsConnected(
                                     :final isTransmitting,
                                     :final connectedPeers,
@@ -129,14 +134,14 @@ class _CommsScreenState extends State<CommsScreen> {
                       ),
                       const SizedBox(height: 24),
                       FilledButton.icon(
-                        onPressed: isConnecting || isConnected
+                        onPressed: isRoomOpen || isConnected
                             ? null
                             : () {
                                 final requestedRoom = _roomController.text.trim();
                                 if (requestedRoom.isEmpty) {
                                   ScaffoldMessenger.of(context).showSnackBar(
                                     const SnackBar(
-                                      content: Text('Enter a room ID to connect.'),
+                                      content: Text('Enter a room ID to open.'),
                                     ),
                                   );
                                   return;
@@ -146,18 +151,12 @@ class _CommsScreenState extends State<CommsScreen> {
                                       ConnectToRoomRequested(requestedRoom),
                                     );
                               },
-                        icon: isConnecting
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
-                              )
-                            : const Icon(Icons.wifi_calling_3),
-                        label: Text(isConnecting ? 'Connecting...' : 'Join Room'),
+                        icon: const Icon(Icons.wifi_calling_3),
+                        label: const Text('Open Room'),
                       ),
                       const SizedBox(height: 12),
                       OutlinedButton.icon(
-                        onPressed: isConnected
+                        onPressed: isRoomOpen || isConnected
                             ? () {
                                 context.read<CommsBloc>().add(
                                       const PushToTalkChanged(false),
@@ -168,7 +167,7 @@ class _CommsScreenState extends State<CommsScreen> {
                               }
                             : null,
                         icon: const Icon(Icons.call_end),
-                        label: const Text('Leave Room'),
+                        label: Text(isConnected ? 'Leave Room' : 'Close Room'),
                       ),
                       if (isConnected) ...[
                         const SizedBox(height: 20),
@@ -234,7 +233,13 @@ class _CommsScreenState extends State<CommsScreen> {
                       ],
                       const SizedBox(height: 24),
                       Text(
-                        'Nearby Connections handles discovery and connection setup. Next steps are runtime permissions, audio focus, and resilience/metrics.',
+                        switch (state) {
+                          CommsSessionOpen(:final isDiscovering) => isDiscovering
+                              ? 'Nearby is scanning briefly for matching room peers while keeping this room open for inbound connections.'
+                              : 'This room stays open for inbound connections without continuously scanning nearby devices.',
+                          _ =>
+                            'Nearby Connections handles discovery and connection setup. Next steps are runtime permissions, audio focus, and resilience/metrics.',
+                        },
                         style: TextStyle(color: Colors.white.withValues(alpha: 0.55)),
                       ),
                     ],
@@ -250,7 +255,7 @@ class _CommsScreenState extends State<CommsScreen> {
 
   String _statusLabel(CommsState state) {
     return switch (state) {
-      CommsConnecting() => 'Connecting',
+      CommsSessionOpen() => 'Room Open',
       CommsConnected() => 'Connected',
       CommsFailure() => 'Connection Error',
       _ => 'Ready',

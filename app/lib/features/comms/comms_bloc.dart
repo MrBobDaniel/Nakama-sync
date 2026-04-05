@@ -28,7 +28,12 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
     ConnectToRoomRequested event,
     Emitter<CommsState> emit,
   ) async {
-    emit(CommsConnecting(event.roomId));
+    emit(
+      CommsSessionOpen(
+        event.roomId,
+        statusMessage: 'Opening room for nearby connections.',
+      ),
+    );
 
     try {
       await _transportService.initialize(event.roomId);
@@ -76,7 +81,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
     final roomId =
         (payload['roomId'] as String?) ??
         switch (state) {
-          CommsConnecting(:final roomId) => roomId,
+          CommsSessionOpen(:final roomId) => roomId,
           CommsConnected(:final roomId) => roomId,
           CommsFailure(:final roomId) => roomId,
           _ => null,
@@ -86,10 +91,22 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       case 'session_started':
         if (roomId != null) {
           emit(
-            CommsConnecting(
+            CommsSessionOpen(
               roomId,
               statusMessage: payload['message'] as String? ??
-                  'Advertising and discovering via Nearby Connections.',
+                  'Room is open and Nearby discovery is active.',
+              isDiscovering: payload['isDiscovering'] as bool? ?? true,
+            ),
+          );
+        }
+      case 'discovery_idle':
+        final currentState = state;
+        if (currentState is CommsSessionOpen) {
+          emit(
+            currentState.copyWith(
+              statusMessage: payload['message'] as String? ??
+                  'Room is open. Listening for incoming connections.',
+              isDiscovering: false,
             ),
           );
         }
@@ -97,9 +114,10 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       case 'connection_initiated':
         if (roomId != null) {
           emit(
-            CommsConnecting(
+            CommsSessionOpen(
               roomId,
               statusMessage: payload['message'] as String? ?? 'Nearby peer found.',
+              isDiscovering: payload['isDiscovering'] as bool? ?? true,
             ),
           );
         }
@@ -128,10 +146,11 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       case 'disconnected':
         if (roomId != null) {
           emit(
-            CommsConnecting(
+            CommsSessionOpen(
               roomId,
               statusMessage: payload['message'] as String? ??
-                  'Peer disconnected. Searching again.',
+                  'Peer disconnected. Room remains open for new connections.',
+              isDiscovering: payload['isDiscovering'] as bool? ?? false,
             ),
           );
         }

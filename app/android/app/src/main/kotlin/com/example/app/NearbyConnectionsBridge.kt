@@ -14,6 +14,8 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.ContextCompat
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
@@ -48,6 +50,7 @@ class NearbyConnectionsBridge(
     private val serviceId = "com.example.app.walkie"
     private val connectionsClient: ConnectionsClient = Nearby.getConnectionsClient(context)
     private val executor = Executors.newCachedThreadPool()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val activeEndpoints = linkedSetOf<String>()
     private val discoveredEndpoints = ConcurrentHashMap.newKeySet<String>()
     private val receivedStreams = ConcurrentHashMap<Long, Payload>()
@@ -58,6 +61,8 @@ class NearbyConnectionsBridge(
     private var displayName: String = "Nakama Android"
     private var currentAudioStreamer: AudioStreamer? = null
     private var pendingStartSessionResult: MethodChannel.Result? = null
+    private var isDiscovering = false
+    private var discoveryStopRunnable: Runnable? = null
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
@@ -150,17 +155,14 @@ class NearbyConnectionsBridge(
 
         stopSession()
 
-        emit("session_started", "Starting Nearby Connections advertising and discovery.")
+        emit("session_started", "Opening room and starting Nearby advertising.", mapOf("isDiscovering" to true))
 
         val advertisingOptions = AdvertisingOptions.Builder()
             .setStrategy(strategy)
             .build()
-        val discoveryOptions = DiscoveryOptions.Builder()
-            .setStrategy(strategy)
-            .build()
 
         connectionsClient.startAdvertising(
-            displayName,
+            localEndpointInfo(),
             serviceId,
             connectionLifecycleCallback,
             advertisingOptions,
@@ -168,13 +170,7 @@ class NearbyConnectionsBridge(
             emit("error", "Failed to advertise: ${error.localizedMessage ?: "unknown error"}")
         }
 
-        connectionsClient.startDiscovery(
-            serviceId,
-            endpointDiscoveryCallback,
-            discoveryOptions,
-        ).addOnFailureListener { error ->
-            emit("error", "Failed to discover peers: ${error.localizedMessage ?: "unknown error"}")
-        }
+        startDiscoveryBurst("Scanning briefly for nearby peers in this room.")
 
         result.success(null)
     }
@@ -218,6 +214,9 @@ class NearbyConnectionsBridge(
         discoveredEndpoints.clear()
         receivedStreams.clear()
         endpointRoomMatches.clear()
+        discoveryStopRunnable?.let(mainHandler::removeCallbacks)
+        discoveryStopRunnable = null
+        isDiscovering = false
         connectionsClient.stopAllEndpoints()
         connectionsClient.stopAdvertising()
         connectionsClient.stopDiscovery()
@@ -253,6 +252,7 @@ class NearbyConnectionsBridge(
             "message" to message,
             "roomId" to roomId,
             "connectedPeers" to activeEndpoints.size,
+            "isDiscovering" to isDiscovering,
         )
         payload.putAll(extra)
         eventSink?.success(payload)
@@ -264,9 +264,19 @@ class NearbyConnectionsBridge(
                 return
             }
 
-            emit("peer_discovered", "Found nearby peer ${info.endpointName}.")
+            if (activeEndpoints.isNotEmpty()) {
+                return
+            }
+
+            val remoteEndpoint = parseEndpointInfo(info.endpointInfo)
+            if (!roomMatches(remoteEndpoint.roomId)) {
+                return
+            }
+
+            val remoteName = remoteEndpoint.displayName ?: info.endpointName
+            emit("peer_discovered", "Found nearby peer ${remoteName.ifBlank { "in this room" }}.")
             connectionsClient.requestConnection(
-                displayName,
+                localEndpointInfo(),
                 endpointId,
                 connectionLifecycleCallback,
             ).addOnFailureListener { error ->
@@ -277,14 +287,23 @@ class NearbyConnectionsBridge(
         override fun onEndpointLost(endpointId: String) {
             discoveredEndpoints.remove(endpointId)
             if (activeEndpoints.remove(endpointId)) {
-                emit("disconnected", "Nearby peer left range. Searching again.")
+                emit("disconnected", "Nearby peer left range. Room remains open for reconnects.")
+                startDiscoveryBurst("Peer left range. Scanning briefly for reconnects.")
             }
         }
     }
 
     private val connectionLifecycleCallback = object : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
-            emit("connection_initiated", "Connection initiated with ${info.endpointName}.")
+            val remoteEndpoint = parseEndpointInfo(info.endpointInfo)
+            if (!roomMatches(remoteEndpoint.roomId)) {
+                endpointRoomMatches[endpointId] = false
+                connectionsClient.rejectConnection(endpointId)
+                emit("error", "Ignoring Nearby peer from a different room.")
+                return
+            }
+
+            emit("connection_initiated", "Connection initiated with ${remoteEndpoint.displayName ?: info.endpointName}.")
             connectionsClient.acceptConnection(endpointId, payloadCallback)
                 .addOnFailureListener { error ->
                     emit("error", "Failed to accept connection: ${error.localizedMessage ?: "unknown error"}")
@@ -295,6 +314,7 @@ class NearbyConnectionsBridge(
             when (resolution.status.statusCode) {
                 com.google.android.gms.common.api.CommonStatusCodes.SUCCESS -> {
                     activeEndpoints.add(endpointId)
+                    stopDiscovery()
                     sendHandshake(endpointId)
                     emit("connected", "Connected to nearby peer over Nearby Connections.")
                 }
@@ -311,7 +331,9 @@ class NearbyConnectionsBridge(
 
         override fun onDisconnected(endpointId: String) {
             activeEndpoints.remove(endpointId)
-            emit("disconnected", "Nearby peer disconnected. Discovery continues in the background.")
+            endpointRoomMatches.remove(endpointId)
+            emit("disconnected", "Nearby peer disconnected. Room remains open for new connections.")
+            startDiscoveryBurst("Peer disconnected. Scanning briefly for another nearby peer.")
         }
     }
 
@@ -440,6 +462,84 @@ class NearbyConnectionsBridge(
         )
     }
 
+    private fun localEndpointInfo(): ByteArray {
+        return JSONObject()
+            .put("roomId", roomId)
+            .put("displayName", displayName)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+    }
+
+    private fun roomMatches(peerRoomId: String?): Boolean {
+        val localRoomId = roomId?.trim()
+        val normalizedPeerRoomId = peerRoomId?.trim()
+        return localRoomId.isNullOrEmpty() || normalizedPeerRoomId == localRoomId
+    }
+
+    private fun parseEndpointInfo(endpointInfo: ByteArray?): NearbyEndpointInfo {
+        if (endpointInfo == null || endpointInfo.isEmpty()) {
+            return NearbyEndpointInfo()
+        }
+
+        val json = runCatching {
+            JSONObject(String(endpointInfo, Charsets.UTF_8))
+        }.getOrNull() ?: return NearbyEndpointInfo()
+
+        return NearbyEndpointInfo(
+            roomId = json.optString("roomId").ifBlank { null },
+            displayName = json.optString("displayName").ifBlank { null },
+        )
+    }
+
+    private fun startDiscoveryBurst(message: String) {
+        if (activeEndpoints.isNotEmpty()) {
+            return
+        }
+
+        discoveryStopRunnable?.let(mainHandler::removeCallbacks)
+
+        val discoveryOptions = DiscoveryOptions.Builder()
+            .setStrategy(strategy)
+            .build()
+
+        isDiscovering = true
+        connectionsClient.startDiscovery(
+            serviceId,
+            endpointDiscoveryCallback,
+            discoveryOptions,
+        ).addOnSuccessListener {
+            emit("session_started", message, mapOf("isDiscovering" to true))
+            scheduleDiscoveryStop()
+        }.addOnFailureListener { error ->
+            emit("error", "Failed to discover peers: ${error.localizedMessage ?: "unknown error"}")
+        }
+    }
+
+    private fun scheduleDiscoveryStop() {
+        val runnable = Runnable {
+            stopDiscovery()
+            emit("discovery_idle", "Room is open. Listening for incoming connections.")
+        }
+        discoveryStopRunnable = runnable
+        mainHandler.postDelayed(runnable, DISCOVERY_WINDOW_MILLIS)
+    }
+
+    private fun stopDiscovery() {
+        discoveryStopRunnable?.let(mainHandler::removeCallbacks)
+        discoveryStopRunnable = null
+        if (!isDiscovering) {
+            return
+        }
+
+        isDiscovering = false
+        connectionsClient.stopDiscovery()
+    }
+
+    private data class NearbyEndpointInfo(
+        val roomId: String? = null,
+        val displayName: String? = null,
+    )
+
     private class AudioStreamer(
         private val context: Context,
         private val connectionsClient: ConnectionsClient,
@@ -567,5 +667,6 @@ class NearbyConnectionsBridge(
         private const val REQUEST_PERMISSIONS_CODE = 3_101
         private const val SAMPLE_RATE = 16_000
         private const val SAMPLE_BUFFER_BYTES = 2_048
+        private const val DISCOVERY_WINDOW_MILLIS = 15_000L
     }
 }
