@@ -6,15 +6,15 @@ This document outlines the implementation plan for laying the project foundation
 
 Initialize the project architecture for **Nakama**, a high-performance gym application. The app features two distinct lanes:
 - **Lane 1 (Music)**: Subsonic-compliant player streaming from a Navidrome server.
-- **Lane 2 (Comms)**: Zero-latency P2P walkie-talkie link powered by WebRTC via Wi-Fi 7 MLO and Wi-Fi Aware (NAN).
+- **Lane 2 (Comms)**: Zero-latency P2P walkie-talkie link powered by Google Nearby Connections using Wi-Fi Aware/NAN-capable bearers and stream payloads for microphone audio.
 
-The focus of this plan is scaffolding the Flutter app with necessary native bridges for background audio/hardware networking, and configuring a Docker environment for the backend signaling server, STUN/TURN nodes, and Tailscale tunnels.
+The focus of this plan is scaffolding the Flutter app with necessary native bridges for background audio/hardware networking, and configuring a Docker environment for optional fallback relay services and Tailscale tunnels.
 
 > [!IMPORTANT]
 > **Key Architecture Decisions Included:**
 > - **State Management**: BLoC and Reactive Streams for event-driven audio ducking and network link switching.
-> - **WebRTC Fallback**: Tailscale-backed Coturn server for failovers when direct P2P NAN connectivity is lost.
-> - **MLO implementation**: "Diversity Mode" Native Bridges bridging Opus packets redundantly across MLO connections.
+> - **Cross-Platform Nearby Transport**: Google Nearby Connections is the primary nearby transport on Android and iOS, replacing the earlier WebRTC-signaling-first NAN design.
+> - **Audio Transport**: Push-to-talk audio uses Nearby Connections stream payloads for the lowest-latency microphone path.
 > - **Native Lifecycles**: Foreground service logic via CallKit (iOS) and ConnectionService (Android).
 
 ---
@@ -27,16 +27,16 @@ We will create a root `docker/` directory containing the containerized backend s
 
 #### [NEW] `docker/docker-compose.yml`
 Sets up the local development/production environment containing:
-- **Signaling Server:** Node.js WebSocket service coordinating WebRTC connections.
+- **Fallback Relay Server:** Node.js service reserved for non-nearby fallback coordination.
 - **Navidrome:** A local Navidrome instance for testing Lane 1 audio.
-- **Coturn:** STUN/TURN server for WebRTC NAT traversal if direct P2P fails.
-- **Tailscale Sidecar:** A Tailscale container securely tunneling traffic (including the TURN failover) to your server.
+- **Relay Service:** Optional fallback transport support if direct Nearby Connections fails outside nearby range.
+- **Tailscale Sidecar:** A Tailscale container securely tunneling traffic to your server for fallback access.
 
 #### [NEW] `docker/signaling/Dockerfile`
-A lightweight Node.js Alpine image for the Signaling server.
+A lightweight Node.js Alpine image for the fallback relay/signaling service.
 
 #### [NEW] `docker/signaling/package.json` & `server.js`
-Basic WebSocket server implementation for WebRTC session orchestration.
+Basic WebSocket server implementation for optional fallback session orchestration.
 
 ---
 
@@ -48,27 +48,27 @@ We will scaffold a fresh Flutter project optimized for high-performance use case
 Initialize a new Flutter application (`flutter create app --platforms=android,ios`).
 
 #### [MODIFY] `app/android/app/src/main/AndroidManifest.xml`
-- App permissions: Wi-Fi Aware (NAN), standard networking, manage own calls (`MANAGE_OWN_CALLS`), and background execution.
+- App permissions: Nearby Connections bearer permissions, Wi-Fi Aware (NAN), microphone capture, manage own calls (`MANAGE_OWN_CALLS`), and background execution.
 - Implement Android `ConnectionService` to ensure the OS treats the Walkie-Talkie link as a priority voice call (preventing mic suspension in the pocket).
 - Enable Impeller rendering on Android.
 
 #### [MODIFY] `app/ios/Runner/Info.plist`
 - Add Background Modes for voice-over-IP (`voip`) and background audio.
+- Add Nearby Connections usage descriptions (`NSBluetoothAlwaysUsageDescription`, `NSLocalNetworkUsageDescription`, `NSBonjourServices`).
 - Initialize iOS `CallKit` configurations to map comms directly to the OS dialer/notification abstractions, enforcing high-priority microphone access.
 - Add network capability definitions required for direct P2P and Wi-Fi bindings.
 
 #### [NEW] `app/lib/core/native_bridge/`
 Scaffolding for custom `MethodChannel` and `EventChannel` definitions communicating with Swift and Kotlin for:
-1. **`MloNetworkManager`**: Wi-Fi 7 explicit native bindings configured for **Diversity Mode** (duplicating Opus audio packets concurrently across 2.4GHz and 5GHz bands for maximum resilience).
-2. **`AudioSessionManager`**: Reactive Streams emitting link-switching events, combined with ducking/mixing Subsonic audio when WebRTC voices trigger the iOS CallKit/Android ConnectionService channels.
+1. **`NearbyConnectionsManager`**: Cross-platform Google Nearby Connections bindings for advertising, discovery, connection acceptance, peer state events, and push-to-talk stream payload control.
+2. **`AudioSessionManager`**: Reactive Streams emitting link-switching events, combined with ducking/mixing Subsonic audio when nearby voice streaming triggers the iOS CallKit/Android ConnectionService channels.
 
 #### [NEW] `app/lib/features/`
 - `features/music/`: UI and BLoC components for the Subsonic client (Lane 1).
-- `features/comms/`: UI and BLoC logic handling WebRTC state, connection failover (NAN to Tailscale/TURN), and real-time audio ducking (Lane 2).
+- `features/comms/`: UI and BLoC logic handling Nearby Connections state, peer discovery/connection events, optional fallback relay, and real-time audio ducking (Lane 2).
 
 #### [MODIFY] `app/pubspec.yaml`
 Add initial core dependencies: 
-- `flutter_webrtc`: Core WebRTC implementation.
 - `flutter_bloc` / `bloc`: Core state management and reactive streams for linking features.
 - Audio and Telephony plugins to interface with ConnectionService/CallKit (e.g., `flutter_callkit_incoming` or custom bindings).
 - `go_router` for performant navigation.
@@ -77,7 +77,7 @@ Add initial core dependencies:
 
 ## Open Questions
 
-- **Signaling Logic:** Does the signaling server need user authentication via a database right now, or should it just be transient/stateless for the POC?
+- **Relay Fallback Logic:** Does the fallback relay path need user authentication via a database right now, or should it just be transient/stateless for the POC?
 - **Subsonic Library:** Should we use an existing Flutter Subsonic API wrapper, or build the API client from scratch for better performance and audio stream mixing control?
 
 ## Verification Plan
@@ -85,4 +85,5 @@ Add initial core dependencies:
 ### Automated/Manual Constraints
 - Start the Docker environment (`docker-compose up`) and verify the Tailscale tunnel and Coturn instances bind properly.
 - Run the Flutter app with Impeller enabled on iOS and Android test devices.
+- Verify that Nearby Connections can advertise, discover, connect, and stream microphone audio between Android and iOS devices using the same room token.
 - Trigger a mock CallKit/ConnectionService interruption to confirm the OS grants priority microphone/audio ducking capabilities.

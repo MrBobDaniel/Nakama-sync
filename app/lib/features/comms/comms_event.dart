@@ -28,3 +28,12 @@ class PushToTalkChanged extends CommsEvent {
   @override
   List<Object?> get props => [isActive];
 }
+
+class TransportStatusChanged extends CommsEvent {
+  const TransportStatusChanged(this.payload);
+
+  final Map<String, dynamic> payload;
+
+  @override
+  List<Object?> get props => [payload];
+}

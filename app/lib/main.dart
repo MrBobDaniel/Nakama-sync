@@ -6,8 +6,8 @@ import 'core/audio/audio_engine.dart';
 import 'core/config/app_config.dart';
 import 'features/comms/comms_bloc.dart';
 import 'features/comms/comms_state.dart';
-import 'features/comms/data/datasources/signaling_client.dart';
-import 'features/comms/data/repositories/webrtc_service.dart';
+import 'features/comms/data/repositories/comms_transport_service.dart';
+import 'features/comms/data/repositories/nearby_connections_service.dart';
 import 'features/comms/presentation/screens/comms_screen.dart';
 import 'features/music/data/datasources/subsonic_api_client.dart';
 import 'features/music/data/repositories/music_repository.dart';
@@ -17,6 +17,8 @@ import 'features/music/presentation/screens/music_library_screen.dart';
 import 'features/music/presentation/screens/playlist_detail_screen.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+
   final appConfig = AppConfig.fromEnvironment();
   final apiClient = SubsonicApiClient(
     baseUrl: appConfig.navidromeBaseUrl,
@@ -25,14 +27,14 @@ void main() {
   );
   final musicRepository = SubsonicMusicRepository(apiClient);
   final audioEngine = AudioEngine();
-  final signalingClient = SignalingClient(appConfig.signalingServerUrl);
-  final webRtcService = WebRtcService(signalingClient);
+  final CommsTransportService commsTransportService =
+      NearbyConnectionsService();
 
   runApp(NakamaApp(
     appConfig: appConfig,
     musicRepository: musicRepository,
     audioEngine: audioEngine,
-    webRtcService: webRtcService,
+    commsTransportService: commsTransportService,
   ));
 }
 
@@ -40,14 +42,14 @@ class NakamaApp extends StatelessWidget {
   final AppConfig appConfig;
   final MusicRepository musicRepository;
   final AudioEngine audioEngine;
-  final WebRtcService webRtcService;
+  final CommsTransportService commsTransportService;
 
   const NakamaApp({
     super.key,
     required this.appConfig,
     required this.musicRepository,
     required this.audioEngine,
-    required this.webRtcService,
+    required this.commsTransportService,
   });
 
   GoRouter get _router => GoRouter(
@@ -94,9 +96,9 @@ class NakamaApp extends StatelessWidget {
     return MultiBlocProvider(
       providers: [
         BlocProvider<CommsBloc>(
-          create: (context) => CommsBloc(
-            webRtcService: webRtcService,
-          ),
+            create: (context) => CommsBloc(
+              transportService: commsTransportService,
+            ),
         ),
         if (appConfig.hasMusicConfig)
           BlocProvider<MusicBloc>(

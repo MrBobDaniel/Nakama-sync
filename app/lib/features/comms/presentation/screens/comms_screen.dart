@@ -75,7 +75,7 @@ class _CommsScreenState extends State<CommsScreen> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Join a room to bring up the walkie-talkie signaling and WebRTC path.',
+                        'Join a room to advertise and discover peers with Nearby Connections, then stream push-to-talk audio over a low-latency payload stream.',
                         style: TextStyle(color: Colors.white.withValues(alpha: 0.72)),
                       ),
                       const SizedBox(height: 24),
@@ -105,13 +105,18 @@ class _CommsScreenState extends State<CommsScreen> {
                               const SizedBox(height: 8),
                               Text(
                                 switch (state) {
-                                  CommsConnecting() =>
-                                    'Connecting to room "$roomId"...',
-                                  CommsConnected(:final isTransmitting) =>
+                                  CommsConnecting(:final statusMessage) =>
+                                    statusMessage,
+                                  CommsConnected(
+                                    :final isTransmitting,
+                                    :final connectedPeers,
+                                    :final statusMessage,
+                                  ) =>
                                     isTransmitting
-                                        ? 'Transmitting in room "$roomId".'
-                                        : 'Connected to room "$roomId". Hold to talk.',
+                                        ? 'Transmitting to $connectedPeers peer(s) in room "$roomId".'
+                                        : statusMessage,
                                   CommsFailure(:final message) => message,
+                                  CommsInitial(:final statusMessage) => statusMessage,
                                   _ => 'Idle. No room joined yet.',
                                 },
                                 style: TextStyle(
@@ -189,13 +194,13 @@ class _CommsScreenState extends State<CommsScreen> {
                             decoration: BoxDecoration(
                               color: isTransmitting
                                   ? Colors.redAccent
-                                  : Colors.deepPurple,
+                                  : Colors.teal,
                               borderRadius: BorderRadius.circular(24),
                               boxShadow: [
                                 BoxShadow(
                                   color: (isTransmitting
                                           ? Colors.redAccent
-                                          : Colors.deepPurpleAccent)
+                                          : Colors.tealAccent)
                                       .withValues(alpha: 0.28),
                                   blurRadius: 20,
                                   spreadRadius: 1,
@@ -229,7 +234,7 @@ class _CommsScreenState extends State<CommsScreen> {
                       ],
                       const SizedBox(height: 24),
                       Text(
-                        'Next steps: push-to-talk control, live mic state, ducking, and signal health.',
+                        'Nearby Connections handles discovery and connection setup. Next steps are runtime permissions, audio focus, and resilience/metrics.',
                         style: TextStyle(color: Colors.white.withValues(alpha: 0.55)),
                       ),
                     ],

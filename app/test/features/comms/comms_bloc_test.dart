@@ -1,76 +1,79 @@
 import 'package:app/features/comms/comms_bloc.dart';
 import 'package:app/features/comms/comms_event.dart';
 import 'package:app/features/comms/comms_state.dart';
-import 'package:app/features/comms/data/repositories/webrtc_service.dart';
+import 'package:app/features/comms/data/repositories/comms_transport_service.dart';
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 
-class MockWebRtcService extends Mock implements WebRtcService {}
+class MockCommsTransportService extends Mock implements CommsTransportService {}
 
 void main() {
-  late MockWebRtcService webRtcService;
+  late MockCommsTransportService transportService;
 
   setUp(() {
-    webRtcService = MockWebRtcService();
-    when(() => webRtcService.dispose()).thenAnswer((_) async {});
-    when(() => webRtcService.setPushToTalkActive(any())).thenAnswer((_) async {});
+    transportService = MockCommsTransportService();
+    when(() => transportService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.setPushToTalkActive(any())).thenAnswer((_) async {});
+    when(() => transportService.events).thenAnswer((_) => const Stream.empty());
   });
 
   test('initial state is CommsInitial', () {
-    final bloc = CommsBloc(webRtcService: webRtcService);
-    expect(bloc.state, const CommsInitial());
+    final bloc = CommsBloc(transportService: transportService);
+    expect(bloc.state, const CommsInitial(statusMessage: 'Ready to search for nearby peers.'));
     bloc.close();
   });
 
   blocTest<CommsBloc, CommsState>(
-    'emits connecting then connected when room initialization succeeds',
+    'emits connecting when Nearby session initialization succeeds',
     build: () {
-      when(() => webRtcService.initialize('gym-floor')).thenAnswer((_) async {});
-      return CommsBloc(webRtcService: webRtcService);
+      when(() => transportService.initialize('gym-floor')).thenAnswer((_) async {});
+      return CommsBloc(transportService: transportService);
     },
     act: (bloc) => bloc.add(const ConnectToRoomRequested('gym-floor')),
     expect: () => const [
       CommsConnecting('gym-floor'),
-      CommsConnected('gym-floor'),
     ],
   );
 
   blocTest<CommsBloc, CommsState>(
     'emits failure when room initialization throws',
     build: () {
-      when(() => webRtcService.initialize('gym-floor'))
+      when(() => transportService.initialize('gym-floor'))
           .thenThrow(Exception('socket offline'));
-      return CommsBloc(webRtcService: webRtcService);
+      return CommsBloc(transportService: transportService);
     },
     act: (bloc) => bloc.add(const ConnectToRoomRequested('gym-floor')),
     expect: () => [
       const CommsConnecting('gym-floor'),
-      isA<CommsFailure>(),
+      const CommsFailure('Exception: socket offline', roomId: 'gym-floor'),
     ],
   );
 
   blocTest<CommsBloc, CommsState>(
     'updates transmit state when push-to-talk changes while connected',
     build: () {
-      when(() => webRtcService.initialize('gym-floor')).thenAnswer((_) async {});
-      return CommsBloc(webRtcService: webRtcService);
+      when(() => transportService.initialize('gym-floor')).thenAnswer((_) async {});
+      return CommsBloc(transportService: transportService);
     },
     act: (bloc) async {
-      bloc.add(const ConnectToRoomRequested('gym-floor'));
-      await Future<void>.delayed(Duration.zero);
+      bloc.add(const TransportStatusChanged({
+        'event': 'connected',
+        'roomId': 'gym-floor',
+        'connectedPeers': 1,
+        'message': 'Connected over Nearby Connections.',
+      }));
       bloc.add(const PushToTalkChanged(true));
       bloc.add(const PushToTalkChanged(false));
     },
     expect: () => const [
-      CommsConnecting('gym-floor'),
       CommsConnected('gym-floor'),
       CommsConnected('gym-floor', isTransmitting: true),
-      CommsConnected('gym-floor', isTransmitting: false),
+      CommsConnected('gym-floor'),
     ],
     verify: (_) {
-      verify(() => webRtcService.setPushToTalkActive(true)).called(1);
-      verify(() => webRtcService.setPushToTalkActive(false)).called(greaterThan(0));
+      verify(() => transportService.setPushToTalkActive(true)).called(1);
+      verify(() => transportService.setPushToTalkActive(false)).called(1);
     },
   );
 }

@@ -1,0 +1,41 @@
+name: iOS Verify
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  ios-verify:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        run: flutter --version
+
+      - name: Install Dart and Flutter dependencies
+        run: flutter pub get
+
+      - name: Resolve iOS Swift packages
+        run: xcodebuild -resolvePackageDependencies -project ios/Runner.xcodeproj
+
+      - name: Install CocoaPods dependencies
+        run: |
+          cd ios
+          pod install
+
+      - name: Verify iOS debug build
+        run: flutter build ios --no-codesign --debug

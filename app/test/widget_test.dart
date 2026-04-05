@@ -1,8 +1,10 @@
+import 'dart:async';
+
 import 'package:app/core/audio/audio_engine.dart';
 import 'package:app/core/config/app_config.dart';
 import 'package:app/features/comms/comms_bloc.dart';
 import 'package:app/features/comms/comms_event.dart';
-import 'package:app/features/comms/data/repositories/webrtc_service.dart';
+import 'package:app/features/comms/data/repositories/comms_transport_service.dart';
 import 'package:app/features/music/data/models/song.dart';
 import 'package:app/features/music/data/repositories/music_repository.dart';
 import 'package:app/features/music/data/models/playlist.dart';
@@ -14,7 +16,7 @@ import 'package:mocktail/mocktail.dart';
 class MockMusicRepository extends Mock implements MusicRepository {}
 
 class MockAudioEngine extends Mock implements AudioEngine {}
-class MockWebRtcService extends Mock implements WebRtcService {}
+class MockCommsTransportService extends Mock implements CommsTransportService {}
 
 class FakeSong extends Fake implements Song {}
 
@@ -26,12 +28,13 @@ void main() {
   testWidgets('renders the music library shell', (WidgetTester tester) async {
     final repository = MockMusicRepository();
     final audioEngine = MockAudioEngine();
-    final webRtcService = MockWebRtcService();
+    final transportService = MockCommsTransportService();
 
     when(() => repository.fetchPlaylists()).thenAnswer((_) async => const <Playlist>[]);
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
-    when(() => webRtcService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.events).thenAnswer((_) => const Stream.empty());
 
     await tester.pumpWidget(
       NakamaApp(
@@ -43,7 +46,7 @@ void main() {
         ),
         musicRepository: repository,
         audioEngine: audioEngine,
-        webRtcService: webRtcService,
+        commsTransportService: transportService,
       ),
     );
     await tester.pumpAndSettle();
@@ -57,7 +60,7 @@ void main() {
   ) async {
     final repository = MockMusicRepository();
     final audioEngine = MockAudioEngine();
-    final webRtcService = MockWebRtcService();
+    final transportService = MockCommsTransportService();
     const playlist = Playlist(
       id: 'gym-favorites',
       name: 'Gym Favorites',
@@ -87,7 +90,8 @@ void main() {
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.playSong(any())).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
-    when(() => webRtcService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.events).thenAnswer((_) => const Stream.empty());
 
     await tester.pumpWidget(
       NakamaApp(
@@ -99,7 +103,7 @@ void main() {
         ),
         musicRepository: repository,
         audioEngine: audioEngine,
-        webRtcService: webRtcService,
+        commsTransportService: transportService,
       ),
     );
     await tester.pumpAndSettle();
@@ -114,12 +118,13 @@ void main() {
   testWidgets('opens the comms lane from music', (WidgetTester tester) async {
     final repository = MockMusicRepository();
     final audioEngine = MockAudioEngine();
-    final webRtcService = MockWebRtcService();
+    final transportService = MockCommsTransportService();
 
     when(() => repository.fetchPlaylists()).thenAnswer((_) async => const <Playlist>[]);
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
-    when(() => webRtcService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.events).thenAnswer((_) => const Stream.empty());
 
     await tester.pumpWidget(
       NakamaApp(
@@ -131,7 +136,7 @@ void main() {
         ),
         musicRepository: repository,
         audioEngine: audioEngine,
-        webRtcService: webRtcService,
+        commsTransportService: transportService,
       ),
     );
     await tester.pumpAndSettle();
@@ -149,14 +154,16 @@ void main() {
   ) async {
     final repository = MockMusicRepository();
     final audioEngine = MockAudioEngine();
-    final webRtcService = MockWebRtcService();
+    final transportEvents = StreamController<Map<String, dynamic>>.broadcast();
+    final transportService = MockCommsTransportService();
 
     when(() => repository.fetchPlaylists()).thenAnswer((_) async => const <Playlist>[]);
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
-    when(() => webRtcService.dispose()).thenAnswer((_) async {});
-    when(() => webRtcService.initialize(any())).thenAnswer((_) async {});
-    when(() => webRtcService.setPushToTalkActive(any())).thenAnswer((_) async {});
+    when(() => transportService.dispose()).thenAnswer((_) async {});
+    when(() => transportService.initialize(any())).thenAnswer((_) async {});
+    when(() => transportService.setPushToTalkActive(any())).thenAnswer((_) async {});
+    when(() => transportService.events).thenAnswer((_) => transportEvents.stream);
 
     await tester.pumpWidget(
       NakamaApp(
@@ -168,7 +175,7 @@ void main() {
         ),
         musicRepository: repository,
         audioEngine: audioEngine,
-        webRtcService: webRtcService,
+        commsTransportService: transportService,
       ),
     );
     await tester.pumpAndSettle();
@@ -177,7 +184,15 @@ void main() {
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Join Room'));
-    await tester.pumpAndSettle();
+    await tester.pump();
+
+    transportEvents.add(const {
+      'event': 'connected',
+      'roomId': 'gym-floor',
+      'connectedPeers': 1,
+      'message': 'Connected over Nearby Connections.',
+    });
+    await tester.pump();
 
     final context = tester.element(find.text('Comms Lane'));
     context.read<CommsBloc>().add(const PushToTalkChanged(true));
@@ -188,5 +203,7 @@ void main() {
     verify(() => audioEngine.setVolume(AudioEngine.duckedVolume)).called(1);
     verify(() => audioEngine.setVolume(AudioEngine.defaultVolume))
         .called(greaterThanOrEqualTo(1));
+
+    await transportEvents.close();
   });
 }
