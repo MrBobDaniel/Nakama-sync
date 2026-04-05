@@ -413,7 +413,7 @@ private extension NearbyConnectionsBridge {
   }
 
   func disconnect(_ endpointID: EndpointID) {
-    connectionManager.disconnect(from: [endpointID])
+    connectionManager.disconnect(from: endpointID)
   }
 }
 #endif
