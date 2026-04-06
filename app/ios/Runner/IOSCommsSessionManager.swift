@@ -128,6 +128,10 @@ final class IOSCommsSessionManager: NSObject {
     try configureAudioSession(activate: true)
   }
 
+  func deactivateVoiceAudio() {
+    deactivateAudioSession()
+  }
+
   func updateAudioState(isReceivingAudio: Bool, isTransmitting: Bool) {
     self.isReceivingAudio = isReceivingAudio
     self.isTransmitting = isTransmitting

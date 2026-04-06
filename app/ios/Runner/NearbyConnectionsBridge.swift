@@ -42,6 +42,9 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       guard let self else { return }
       try self.commsSessionManager.prepareForVoiceAudio()
     },
+    deactivateAudioSession: { [weak self] in
+      self?.commsSessionManager.deactivateVoiceAudio()
+    },
     onError: { [weak self] message in
       self?.emit(event: "error", message: message)
     },
@@ -719,6 +722,7 @@ private extension NearbyConnectionsBridge {
 
 private final class NearbyAudioController {
   private let prepareAudioSession: () throws -> Void
+  private let deactivateAudioSession: () -> Void
   private let onError: (String) -> Void
   private let onPeerSpeakingChanged: (EndpointID, Bool) -> Void
   private let transmitQueueKey = DispatchSpecificKey<Void>()
@@ -765,10 +769,12 @@ private final class NearbyAudioController {
 
   init(
     prepareAudioSession: @escaping () throws -> Void,
+    deactivateAudioSession: @escaping () -> Void,
     onError: @escaping (String) -> Void,
     onPeerSpeakingChanged: @escaping (EndpointID, Bool) -> Void
   ) {
     self.prepareAudioSession = prepareAudioSession
+    self.deactivateAudioSession = deactivateAudioSession
     self.onError = onError
     self.onPeerSpeakingChanged = onPeerSpeakingChanged
     transmitQueue.setSpecific(key: transmitQueueKey, value: ())
@@ -1133,11 +1139,7 @@ private final class NearbyAudioController {
     mixerTimer = nil
     captureConverter = nil
     clearPendingCaptureData()
-    do {
-      try session.setActive(false, options: [.notifyOthersOnDeactivation])
-    } catch {
-      onError(error.localizedDescription)
-    }
+    deactivateAudioSession()
   }
 
   private func makeBoundStreams() throws -> (input: InputStream, output: OutputStream) {
