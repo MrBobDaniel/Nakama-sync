@@ -662,11 +662,9 @@ private final class NearbyAudioController {
       ]
     )
     try session.setPreferredSampleRate(16_000)
-    try session.setPreferredInputNumberOfChannels(1)
-    try session.setPreferredOutputNumberOfChannels(1)
     try session.setPreferredIOBufferDuration(0.02)
-    try session.overrideOutputAudioPort(.speaker)
     try session.setActive(true)
+    try? session.overrideOutputAudioPort(.speaker)
   }
 
   private func configureAudioEngineIfNeeded() throws {

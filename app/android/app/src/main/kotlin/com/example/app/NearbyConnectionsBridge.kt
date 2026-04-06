@@ -269,7 +269,14 @@ class NearbyConnectionsBridge(
             "isDiscovering" to isDiscovering,
         )
         payload.putAll(extra)
-        eventSink?.success(payload)
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            eventSink?.success(payload)
+            return
+        }
+
+        mainHandler.post {
+            eventSink?.success(payload)
+        }
     }
 
     private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
