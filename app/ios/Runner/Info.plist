@@ -15,7 +15,7 @@
 	<string>Nakama Sync uses the local network to discover and communicate with nearby walkie-talkie peers.</string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_b6f781e6abcb._tcp</string>
+		<string>_5a731ab9f7b8._tcp</string>
 	</array>
 	<key>UIRequiresPersistentWiFi</key>
 	<true/>

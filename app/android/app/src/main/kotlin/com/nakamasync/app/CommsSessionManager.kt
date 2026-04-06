@@ -52,6 +52,9 @@ object CommsSessionManager {
     @Volatile
     private var suppressDisconnectCallback = false
 
+    @Volatile
+    private var isForegroundServiceLaunched = false
+
     fun setListener(listener: Listener?) {
         this.listener = listener
     }
@@ -72,7 +75,9 @@ object CommsSessionManager {
 
         val foregroundStarted = startForegroundService(context)
         val connectionStarted = startConnectionServiceCall(context, roomId)
-        updateForegroundService(context)
+        if (foregroundStarted) {
+            updateForegroundService(context)
+        }
 
         val message = buildString {
             append(
@@ -127,6 +132,7 @@ object CommsSessionManager {
         suppressDisconnectCallback = false
 
         stopForegroundService(context)
+        isForegroundServiceLaunched = false
     }
 
     internal fun onConnectionCreated(connection: WalkieTalkieConnection) {
@@ -153,19 +159,29 @@ object CommsSessionManager {
 
     private fun startForegroundService(context: Context): Boolean {
         return runCatching {
-            ContextCompat.startForegroundService(
-                context,
-                CommsForegroundService.createIntent(context, latestState),
-            )
+            if (!isForegroundServiceLaunched) {
+                ContextCompat.startForegroundService(
+                    context,
+                    CommsForegroundService.createIntent(context, latestState),
+                )
+                isForegroundServiceLaunched = true
+            } else {
+                context.startService(CommsForegroundService.createIntent(context, latestState))
+            }
         }.isSuccess
     }
 
     private fun updateForegroundService(context: Context) {
         runCatching {
-            ContextCompat.startForegroundService(
-                context,
-                CommsForegroundService.createIntent(context, latestState),
-            )
+            if (isForegroundServiceLaunched) {
+                context.startService(CommsForegroundService.createIntent(context, latestState))
+            } else {
+                ContextCompat.startForegroundService(
+                    context,
+                    CommsForegroundService.createIntent(context, latestState),
+                )
+                isForegroundServiceLaunched = true
+            }
         }
     }
 
