@@ -71,6 +71,7 @@ class NearbyConnectionsBridge(
     private var currentAudioStreamer: AudioStreamer? = null
     private var pendingStartSessionResult: MethodChannel.Result? = null
     private var isDiscovering = false
+    private var isDiscoveryStartInFlight = false
     private var discoveryStopRunnable: Runnable? = null
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -230,6 +231,7 @@ class NearbyConnectionsBridge(
         discoveryStopRunnable?.let(mainHandler::removeCallbacks)
         discoveryStopRunnable = null
         isDiscovering = false
+        isDiscoveryStartInFlight = false
         connectionsClient.stopAllEndpoints()
         connectionsClient.stopAdvertising()
         connectionsClient.stopDiscovery()
@@ -532,19 +534,29 @@ class NearbyConnectionsBridge(
 
         discoveryStopRunnable?.let(mainHandler::removeCallbacks)
 
+        if (isDiscovering || isDiscoveryStartInFlight) {
+            emit("session_started", message, mapOf("isDiscovering" to true))
+            scheduleDiscoveryStop()
+            return
+        }
+
         val discoveryOptions = DiscoveryOptions.Builder()
             .setStrategy(strategy)
             .build()
 
+        isDiscoveryStartInFlight = true
         isDiscovering = true
         connectionsClient.startDiscovery(
             serviceId,
             endpointDiscoveryCallback,
             discoveryOptions,
         ).addOnSuccessListener {
+            isDiscoveryStartInFlight = false
             emit("session_started", message, mapOf("isDiscovering" to true))
             scheduleDiscoveryStop()
         }.addOnFailureListener { error ->
+            isDiscoveryStartInFlight = false
+            isDiscovering = false
             emit("error", "Failed to discover peers: ${error.localizedMessage ?: "unknown error"}")
         }
     }
@@ -566,6 +578,7 @@ class NearbyConnectionsBridge(
         }
 
         isDiscovering = false
+        isDiscoveryStartInFlight = false
         connectionsClient.stopDiscovery()
     }
 
