@@ -184,6 +184,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
         }
       }
     } else {
+      sendControlPayload(type: "audio_stop", to: endpointID)
       audioController.stopTransmitting()
       emit(event: "transmit_state", message: "Push-to-talk stream is idle.", extra: [
         "isTransmitting": false
@@ -329,7 +330,7 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
     withID payloadID: PayloadID,
     from endpointID: EndpointID
   ) {
-    if handleHandshakePayload(data, from: endpointID) {
+    if handleControlPayload(data, from: endpointID) {
       return
     }
 
@@ -385,29 +386,46 @@ private extension NearbyConnectionsBridge {
   }
 
   func sendHandshake(to endpointID: EndpointID) {
-    let handshake: [String: Any] = [
-      "type": "hello",
+    sendControlPayload(type: "hello", to: endpointID)
+  }
+
+  func sendControlPayload(type: String, to endpointID: EndpointID) {
+    let payload: [String: Any] = [
+      "type": type,
       "roomId": roomID as Any,
       "displayName": displayName,
     ]
     guard
-      let handshakeData = try? JSONSerialization.data(
-        withJSONObject: handshake
+      let payloadData = try? JSONSerialization.data(
+        withJSONObject: payload
       )
     else {
       emit(event: "error", message: "Failed to encode Nearby peer metadata.")
       return
     }
 
-    connectionManager.send(handshakeData, to: [endpointID])
+    connectionManager.send(payloadData, to: [endpointID])
   }
 
-  func handleHandshakePayload(_ data: Data, from endpointID: EndpointID) -> Bool {
+  func handleControlPayload(_ data: Data, from endpointID: EndpointID) -> Bool {
     guard
       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      let type = json["type"] as? String,
-      type == "hello"
+      let type = json["type"] as? String
     else {
+      return false
+    }
+
+    if type == "audio_stop" {
+      audioController.stopIncomingAudio(from: endpointID)
+      emit(
+        event: "receive_state",
+        message: "Incoming voice audio is idle.",
+        extra: ["isReceivingAudio": false]
+      )
+      return true
+    }
+
+    guard type == "hello" else {
       return false
     }
 
@@ -650,6 +668,11 @@ private final class NearbyAudioController {
     inboundReaders.values.forEach { $0.stop() }
     inboundReaders.removeAll()
     tearDownAudioIfIdle(forceDeactivate: true)
+  }
+
+  func stopIncomingAudio(from endpointID: EndpointID) {
+    inboundReaders.removeValue(forKey: endpointID)?.stop()
+    tearDownAudioIfIdle()
   }
 
   private func configureAudioSession() throws {

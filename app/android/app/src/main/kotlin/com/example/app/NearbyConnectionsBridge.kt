@@ -64,6 +64,7 @@ class NearbyConnectionsBridge(
     private val endpointRoomMatches = ConcurrentHashMap<String, Boolean>()
     private val pendingOutgoingConnections = ConcurrentHashMap.newKeySet<String>()
     private val pendingConnectionRequests = ConcurrentHashMap<String, Runnable>()
+    private val incomingAudioPlaybacks = ConcurrentHashMap<String, IncomingAudioPlayback>()
 
     private var eventSink: EventChannel.EventSink? = null
     private var roomId: String? = null
@@ -210,6 +211,7 @@ class NearbyConnectionsBridge(
                 }
             }
         } else {
+            sendAudioControl(endpointId, "audio_stop")
             currentAudioStreamer?.stop()
             currentAudioStreamer = null
             emit("transmit_state", "Push-to-talk stream is idle.", mapOf("isTransmitting" to false))
@@ -221,6 +223,8 @@ class NearbyConnectionsBridge(
     private fun stopSession() {
         currentAudioStreamer?.stop()
         currentAudioStreamer = null
+        incomingAudioPlaybacks.values.forEach { it.stop() }
+        incomingAudioPlaybacks.clear()
         activeEndpoints.clear()
         discoveredEndpoints.clear()
         receivedStreams.clear()
@@ -305,6 +309,7 @@ class NearbyConnectionsBridge(
             cancelPendingConnectionRequest(endpointId)
             discoveredEndpoints.remove(endpointId)
             if (activeEndpoints.remove(endpointId)) {
+                incomingAudioPlaybacks.remove(endpointId)?.stop()
                 emit("disconnected", "Nearby peer left range. Room remains open for reconnects.")
                 startDiscoveryBurst("Peer left range. Scanning briefly for reconnects.")
             }
@@ -356,6 +361,7 @@ class NearbyConnectionsBridge(
             cancelPendingConnectionRequest(endpointId)
             activeEndpoints.remove(endpointId)
             endpointRoomMatches.remove(endpointId)
+            incomingAudioPlaybacks.remove(endpointId)?.stop()
             emit("disconnected", "Nearby peer disconnected. Room remains open for new connections.")
             startDiscoveryBurst("Peer disconnected. Scanning briefly for another nearby peer.")
         }
@@ -371,7 +377,7 @@ class NearbyConnectionsBridge(
                     }
                     receivedStreams[payload.id] = payload
                     emit("stream_received", "Incoming audio stream received from nearby peer.")
-                    playIncomingStream(payload)
+                    playIncomingStream(endpointId, payload)
                 }
 
                 Payload.Type.BYTES -> {
@@ -396,62 +402,34 @@ class NearbyConnectionsBridge(
         }
     }
 
-    private fun playIncomingStream(payload: Payload) {
-        executor.execute {
-            val inputStream = payload.asStream()?.asInputStream() ?: return@execute
-            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            val previousMode = audioManager.mode
-            val previousSpeakerphoneState = audioManager.isSpeakerphoneOn
-            audioFocusController.acquire()
-            emit("receive_state", "Receiving nearby voice audio.", mapOf("isReceivingAudio" to true))
-            val minBufferSize = AudioTrack.getMinBufferSize(
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-            )
-            val audioTrack = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .build(),
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(SAMPLE_RATE)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build(),
-                )
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .setBufferSizeInBytes(minBufferSize.coerceAtLeast(SAMPLE_BUFFER_BYTES))
-                .build()
-
-            val bufferedInput = BufferedInputStream(inputStream)
-            val buffer = ByteArray(SAMPLE_BUFFER_BYTES)
-
-            try {
-                // Force incoming speech to the loudspeaker instead of the call earpiece.
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = true
-                audioTrack.play()
-                while (true) {
-                    val count = bufferedInput.read(buffer)
-                    if (count <= 0) {
-                        break
-                    }
-                    audioTrack.write(buffer, 0, count)
-                }
-            } finally {
-                bufferedInput.close()
-                audioTrack.stop()
-                audioTrack.release()
-                audioManager.mode = previousMode
-                audioManager.isSpeakerphoneOn = previousSpeakerphoneState
-                audioFocusController.release()
+    private fun playIncomingStream(endpointId: String, payload: Payload) {
+        incomingAudioPlaybacks.remove(endpointId)?.stop()
+        IncomingAudioPlayback(
+            context = context,
+            payload = payload,
+            audioFocusController = audioFocusController,
+            onStarted = {
+                emit("receive_state", "Receiving nearby voice audio.", mapOf("isReceivingAudio" to true))
+            },
+            onEnded = {
+                incomingAudioPlaybacks.remove(endpointId)
                 emit("receive_state", "Incoming voice audio is idle.", mapOf("isReceivingAudio" to false))
-            }
+            },
+        ).also { playback ->
+            incomingAudioPlaybacks[endpointId] = playback
+            playback.start(executor)
         }
+    }
+
+    private fun sendAudioControl(endpointId: String, type: String) {
+        val payload = JSONObject()
+            .put("type", type)
+            .put("roomId", roomId)
+            .put("displayName", displayName)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+
+        connectionsClient.sendPayload(endpointId, Payload.fromBytes(payload))
     }
 
     private fun sendHandshake(endpointId: String) {
@@ -474,9 +452,19 @@ class NearbyConnectionsBridge(
             return
         }
 
-        if (json.optString("type") != "hello") {
-            emit("bytes_received", "Received control payload from nearby peer.")
-            return
+        when (json.optString("type")) {
+            "audio_stop" -> {
+                incomingAudioPlaybacks.remove(endpointId)?.stop()
+                emit("receive_state", "Incoming voice audio is idle.", mapOf("isReceivingAudio" to false))
+                return
+            }
+
+            "hello" -> {}
+
+            else -> {
+                emit("bytes_received", "Received control payload from nearby peer.")
+                return
+            }
         }
 
         val peerRoomId = json.optString("roomId")
@@ -690,6 +678,95 @@ class NearbyConnectionsBridge(
         val roomId: String? = null,
         val displayName: String? = null,
     )
+
+    private class IncomingAudioPlayback(
+        private val context: Context,
+        payload: Payload,
+        private val audioFocusController: AudioFocusController,
+        private val onStarted: () -> Unit,
+        private val onEnded: () -> Unit,
+    ) {
+        private val isRunning = AtomicBoolean(false)
+        private val inputStream = payload.asStream()?.asInputStream()
+
+        fun start(executor: java.util.concurrent.Executor) {
+            if (inputStream == null || !isRunning.compareAndSet(false, true)) {
+                onEnded()
+                return
+            }
+
+            executor.execute {
+                val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                val previousMode = audioManager.mode
+                val previousSpeakerphoneState = audioManager.isSpeakerphoneOn
+                audioFocusController.acquire()
+                onStarted()
+                val minBufferSize = AudioTrack.getMinBufferSize(
+                    SAMPLE_RATE,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                )
+                val audioTrack = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                            .build(),
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(SAMPLE_RATE)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .build(),
+                    )
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .setBufferSizeInBytes(minBufferSize.coerceAtLeast(SAMPLE_BUFFER_BYTES))
+                    .build()
+
+                val bufferedInput = BufferedInputStream(inputStream)
+                val buffer = ByteArray(SAMPLE_BUFFER_BYTES)
+
+                try {
+                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                    audioManager.isSpeakerphoneOn = true
+                    audioTrack.play()
+                    while (isRunning.get()) {
+                        val count = bufferedInput.read(buffer)
+                        if (count <= 0) {
+                            break
+                        }
+                        audioTrack.write(buffer, 0, count)
+                    }
+                } finally {
+                    try {
+                        bufferedInput.close()
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        audioTrack.stop()
+                    } catch (_: Exception) {
+                    }
+                    audioTrack.release()
+                    audioManager.mode = previousMode
+                    audioManager.isSpeakerphoneOn = previousSpeakerphoneState
+                    audioFocusController.release()
+                    isRunning.set(false)
+                    onEnded()
+                }
+            }
+        }
+
+        fun stop() {
+            if (!isRunning.compareAndSet(true, false)) {
+                return
+            }
+            try {
+                inputStream?.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
 
     private class AudioStreamer(
         private val context: Context,
