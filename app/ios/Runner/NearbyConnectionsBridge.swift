@@ -9,10 +9,10 @@ import NearbyConnections
 final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   private let serviceID = "com.nakamasync.app.walkie"
   private lazy var commsSessionManager = IOSCommsSessionManager(
-    onStateChanged: { [weak self] message, extra in
+    onStateChanged: { [weak self] (message: String, extra: [String: Any]) in
       self?.emit(event: "os_session_state", message: message, extra: extra)
     },
-    onSystemSessionEnded: { [weak self] reason in
+    onSystemSessionEnded: { [weak self] (reason: String) in
       guard let self else { return }
       self.emit(event: "error", message: reason)
       self.stopSession()
