@@ -397,6 +397,9 @@ class NearbyConnectionsBridge(
     private fun playIncomingStream(payload: Payload) {
         executor.execute {
             val inputStream = payload.asStream()?.asInputStream() ?: return@execute
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val previousMode = audioManager.mode
+            val previousSpeakerphoneState = audioManager.isSpeakerphoneOn
             audioFocusController.acquire()
             emit("receive_state", "Receiving nearby voice audio.", mapOf("isReceivingAudio" to true))
             val minBufferSize = AudioTrack.getMinBufferSize(
@@ -426,6 +429,9 @@ class NearbyConnectionsBridge(
             val buffer = ByteArray(SAMPLE_BUFFER_BYTES)
 
             try {
+                // Force incoming speech to the loudspeaker instead of the call earpiece.
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager.isSpeakerphoneOn = true
                 audioTrack.play()
                 while (true) {
                     val count = bufferedInput.read(buffer)
@@ -438,6 +444,8 @@ class NearbyConnectionsBridge(
                 bufferedInput.close()
                 audioTrack.stop()
                 audioTrack.release()
+                audioManager.mode = previousMode
+                audioManager.isSpeakerphoneOn = previousSpeakerphoneState
                 audioFocusController.release()
                 emit("receive_state", "Incoming voice audio is idle.", mapOf("isReceivingAudio" to false))
             }

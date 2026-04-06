@@ -393,6 +393,8 @@ class _DiagnosticsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final diagnostics = state.diagnostics;
+    final isReceivingAudio = diagnostics.isReceivingAudio;
+    final isTransmitting = diagnostics.isTransmitting;
     final roomId = switch (state) {
       CommsSessionOpen(:final roomId) => roomId,
       CommsConnected(:final roomId) => roomId,
@@ -410,6 +412,14 @@ class _DiagnosticsCard extends StatelessWidget {
             const Text(
               'Diagnostics',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 12),
+            _AudioActivityBanner(
+              isReceivingAudio: isReceivingAudio,
+              isTransmitting: isTransmitting,
+              connectedPeers: diagnostics.connectedPeers,
+              roomId: roomId,
+              lastEvent: diagnostics.lastEvent,
             ),
             const SizedBox(height: 12),
             Wrap(
@@ -441,49 +451,107 @@ class _DiagnosticsCard extends StatelessWidget {
               ],
             ),
             const SizedBox(height: 12),
-            Text(
-              diagnostics.lastMessage,
-              style: TextStyle(color: Colors.white.withValues(alpha: 0.72)),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: isReceivingAudio
+                    ? Colors.blueAccent.withValues(alpha: 0.12)
+                    : Colors.white.withValues(alpha: 0.03),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: isReceivingAudio
+                      ? Colors.blueAccent.withValues(alpha: 0.4)
+                      : Colors.white.withValues(alpha: 0.08),
+                ),
+              ),
+              child: Text(
+                diagnostics.lastMessage,
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.82),
+                  fontWeight: isReceivingAudio ? FontWeight.w600 : FontWeight.w400,
+                ),
+              ),
             ),
             if (diagnostics.recentEvents.isNotEmpty) ...[
               const SizedBox(height: 12),
               const Divider(height: 1),
               const SizedBox(height: 12),
               ...diagnostics.recentEvents.map(
-                (entry) => Padding(
-                  padding: const EdgeInsets.only(bottom: 10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        entry.event,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.3,
-                        ),
+                (entry) {
+                  final isReceiveEvent =
+                      entry.event == 'receive_state' ||
+                      entry.message.toLowerCase().contains('receiving');
+                  final accent = isReceiveEvent
+                      ? Colors.blueAccent
+                      : entry.event == 'transmit_state'
+                      ? Colors.redAccent
+                      : Colors.white;
+
+                  return Container(
+                    width: double.infinity,
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: isReceiveEvent
+                          ? Colors.blueAccent.withValues(alpha: 0.08)
+                          : Colors.white.withValues(alpha: 0.02),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: isReceiveEvent
+                            ? Colors.blueAccent.withValues(alpha: 0.28)
+                            : Colors.white.withValues(alpha: 0.06),
                       ),
-                      const SizedBox(height: 2),
-                      Text(
-                        entry.message,
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: Colors.white.withValues(alpha: 0.76),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: accent,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              entry.event,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                letterSpacing: 0.3,
+                                color: accent.withValues(
+                                  alpha: accent == Colors.white ? 0.9 : 1,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
-                      if (entry.details.isNotEmpty) ...[
-                        const SizedBox(height: 2),
+                        const SizedBox(height: 6),
                         Text(
-                          entry.details.join(' • '),
+                          entry.message,
                           style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.white.withValues(alpha: 0.5),
+                            fontSize: 13,
+                            color: Colors.white.withValues(alpha: 0.76),
                           ),
                         ),
+                        if (entry.details.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            entry.details.join(' • '),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Colors.white.withValues(alpha: 0.5),
+                            ),
+                          ),
+                        ],
                       ],
-                    ],
-                  ),
-                ),
+                    ),
+                  );
+                },
               ),
             ],
           ],
@@ -525,6 +593,160 @@ class _DiagnosticChip extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _AudioActivityBanner extends StatelessWidget {
+  const _AudioActivityBanner({
+    required this.isReceivingAudio,
+    required this.isTransmitting,
+    required this.connectedPeers,
+    required this.roomId,
+    required this.lastEvent,
+  });
+
+  final bool isReceivingAudio;
+  final bool isTransmitting;
+  final int connectedPeers;
+  final String roomId;
+  final String lastEvent;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color accent = isReceivingAudio
+        ? Colors.blueAccent
+        : isTransmitting
+        ? Colors.redAccent
+        : Colors.grey;
+    final IconData icon = isReceivingAudio
+        ? Icons.hearing
+        : isTransmitting
+        ? Icons.campaign
+        : Icons.graphic_eq;
+    final String title = isReceivingAudio
+        ? 'Incoming Audio Detected'
+        : isTransmitting
+        ? 'Broadcast Active'
+        : 'Audio Idle';
+    final String subtitle = isReceivingAudio
+        ? 'Receiving live voice in room "$roomId" from $connectedPeers peer(s).'
+        : isTransmitting
+        ? 'This device is currently sending microphone audio.'
+        : 'No live voice packets are being received right now.';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            accent.withValues(alpha: 0.24),
+            const Color(0xFF1A1A1A),
+          ],
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+        ),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: accent.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.18),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: accent),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.76),
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              _SignalPill(
+                color: accent,
+                label: isReceivingAudio
+                    ? 'LIVE RX'
+                    : isTransmitting
+                    ? 'LIVE TX'
+                    : 'IDLE',
+              ),
+              const SizedBox(height: 8),
+              Text(
+                lastEvent,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.white.withValues(alpha: 0.56),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SignalPill extends StatelessWidget {
+  const _SignalPill({required this.color, required this.label});
+
+  final Color color;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.18),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.55)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              color: color,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.3,
+            ),
+          ),
+        ],
       ),
     );
   }
