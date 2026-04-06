@@ -8,11 +8,11 @@
 		<string>voip</string>
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Nakama requires microphone access for the zero-latency walkie-talkie mode.</string>
+	<string>Nakama Sync requires microphone access for the zero-latency walkie-talkie mode.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Nakama uses Bluetooth to discover and negotiate nearby walkie-talkie peers.</string>
+	<string>Nakama Sync uses Bluetooth to discover and negotiate nearby walkie-talkie peers.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Nakama uses the local network to discover and communicate with nearby walkie-talkie peers.</string>
+	<string>Nakama Sync uses the local network to discover and communicate with nearby walkie-talkie peers.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_b6f781e6abcb._tcp</string>
@@ -24,7 +24,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>App</string>
+	<string>Nakama Sync</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -32,7 +32,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>app</string>
+	<string>nakama_sync</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

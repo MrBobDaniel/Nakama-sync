@@ -5,9 +5,9 @@ import 'package:flutter/services.dart';
 
 class NearbyConnectionsManager {
   static const MethodChannel _channel =
-      MethodChannel('nakama.local/nearby_connections');
+      MethodChannel('nakama_sync.local/nearby_connections');
   static const EventChannel _eventChannel =
-      EventChannel('nakama.local/nearby_connections/events');
+      EventChannel('nakama_sync.local/nearby_connections/events');
 
   static Stream<Map<String, dynamic>>? _events;
 

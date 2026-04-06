@@ -1,4 +1,4 @@
-package com.example.app
+package com.nakamasync.app
 
 import android.telecom.Connection
 import android.telecom.ConnectionRequest

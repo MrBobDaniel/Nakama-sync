@@ -1,10 +1,10 @@
-# Nakama Project Initialization
+# Nakama Sync Project Initialization
 
 This document outlines the implementation plan for laying the project foundations, covering the Flutter mobile application scaffolding and the Dockerized backend environment. 
 
 ## Goal Description
 
-Initialize the project architecture for **Nakama**, a high-performance gym application. The app features two distinct lanes:
+Initialize the project architecture for **Nakama Sync**, a high-performance gym application. The app features two distinct lanes:
 - **Lane 1 (Music)**: Subsonic-compliant player streaming from a Navidrome server.
 - **Lane 2 (Comms)**: Zero-latency P2P walkie-talkie link powered by Google Nearby Connections using Wi-Fi Aware/NAN-capable bearers and stream payloads for microphone audio.
 

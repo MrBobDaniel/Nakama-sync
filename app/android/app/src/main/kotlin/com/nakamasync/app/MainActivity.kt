@@ -1,4 +1,4 @@
-package com.example.app
+package com.nakamasync.app
 
 import android.content.pm.PackageManager
 import io.flutter.embedding.engine.FlutterEngine
@@ -17,12 +17,12 @@ class MainActivity : FlutterActivity() {
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
-            "nakama.local/nearby_connections",
+            "nakama_sync.local/nearby_connections",
         ).setMethodCallHandler(bridge)
 
         EventChannel(
             flutterEngine.dartExecutor.binaryMessenger,
-            "nakama.local/nearby_connections/events",
+            "nakama_sync.local/nearby_connections/events",
         ).setStreamHandler(bridge)
     }
 

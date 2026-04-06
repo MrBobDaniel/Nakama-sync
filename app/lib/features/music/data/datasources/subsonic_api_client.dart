@@ -25,7 +25,7 @@ class SubsonicApiClient {
   String _generateAuthQuery() {
     final salt = _generateSalt();
     final token = md5.convert(utf8.encode(password + salt)).toString();
-    return 'u=$username&t=$token&s=$salt&v=1.16.1&c=nakama&f=json';
+    return 'u=$username&t=$token&s=$salt&v=1.16.1&c=nakama_sync&f=json';
   }
   
   String get authQuery => _generateAuthQuery();

@@ -7,9 +7,9 @@ import NearbyConnections
 #endif
 
 final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
-  private let serviceID = "com.example.app.walkie"
+  private let serviceID = "com.nakamasync.app.walkie"
   private var roomID: String?
-  private var displayName = "Nakama iPhone"
+  private var displayName = "Nakama Sync iPhone"
   private var eventSink: FlutterEventSink?
 
   #if canImport(NearbyConnections)

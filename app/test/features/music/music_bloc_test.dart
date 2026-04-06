@@ -1,12 +1,12 @@
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
-import 'package:app/features/music/music_bloc.dart';
-import 'package:app/features/music/music_event.dart';
-import 'package:app/features/music/music_state.dart';
-import 'package:app/features/music/data/repositories/music_repository.dart';
-import 'package:app/core/audio/audio_engine.dart';
-import 'package:app/features/music/data/models/playlist.dart';
+import 'package:nakama_sync/features/music/music_bloc.dart';
+import 'package:nakama_sync/features/music/music_event.dart';
+import 'package:nakama_sync/features/music/music_state.dart';
+import 'package:nakama_sync/features/music/data/repositories/music_repository.dart';
+import 'package:nakama_sync/core/audio/audio_engine.dart';
+import 'package:nakama_sync/features/music/data/models/playlist.dart';
 
 class MockMusicRepository extends Mock implements MusicRepository {}
 class MockAudioEngine extends Mock implements AudioEngine {}

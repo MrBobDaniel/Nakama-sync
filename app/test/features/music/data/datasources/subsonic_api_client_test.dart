@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:app/features/music/data/datasources/subsonic_api_client.dart';
+import 'package:nakama_sync/features/music/data/datasources/subsonic_api_client.dart';
 import 'package:dio/dio.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -26,7 +26,7 @@ void main() {
       expect(query.contains('t='), isTrue); // token
       expect(query.contains('s='), isTrue); // salt
       expect(query.contains('v=1.16.1'), isTrue);
-      expect(query.contains('c=nakama'), isTrue);
+      expect(query.contains('c=nakama_sync'), isTrue);
       expect(query.contains('f=json'), isTrue);
     });
 

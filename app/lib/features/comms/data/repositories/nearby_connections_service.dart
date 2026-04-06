@@ -6,7 +6,7 @@ import 'comms_transport_service.dart';
 
 class NearbyConnectionsService implements CommsTransportService {
   NearbyConnectionsService({
-    String displayName = 'Nakama',
+    String displayName = 'Nakama Sync',
   }) : _displayName = displayName;
 
   final String _displayName;

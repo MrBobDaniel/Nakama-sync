@@ -31,7 +31,7 @@ void main() {
       NearbyConnectionsService();
 
   runApp(
-    NakamaApp(
+    NakamaSyncApp(
       appConfig: appConfig,
       musicRepository: musicRepository,
       audioEngine: audioEngine,
@@ -40,13 +40,13 @@ void main() {
   );
 }
 
-class NakamaApp extends StatelessWidget {
+class NakamaSyncApp extends StatelessWidget {
   final AppConfig appConfig;
   final MusicRepository musicRepository;
   final AudioEngine audioEngine;
   final CommsTransportService commsTransportService;
 
-  const NakamaApp({
+  const NakamaSyncApp({
     super.key,
     required this.appConfig,
     required this.musicRepository,
@@ -79,7 +79,7 @@ class NakamaApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final app = MaterialApp.router(
-      title: 'Nakama',
+      title: 'Nakama Sync',
       theme: ThemeData(
         brightness: Brightness.dark,
         primaryColor: Colors.deepPurpleAccent,

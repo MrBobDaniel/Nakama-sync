@@ -1,7 +1,7 @@
 {
-  "name": "nakama-signaling-server",
+  "name": "nakama-sync-signaling-server",
   "version": "1.0.0",
-  "description": "Stateless WebSocket signaling server for Nakama WebRTC SDP exchange",
+  "description": "Stateless WebSocket signaling server for Nakama Sync WebRTC SDP exchange",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

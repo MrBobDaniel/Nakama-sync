@@ -1,4 +1,4 @@
-package com.example.app
+package com.nakamasync.app
 
 import android.Manifest
 import android.app.Activity
@@ -53,7 +53,7 @@ class NearbyConnectionsBridge(
 ) : MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
     private val activity = context as? Activity
     private val strategy = Strategy.P2P_POINT_TO_POINT
-    private val serviceId = "com.example.app.walkie"
+    private val serviceId = "com.nakamasync.app.walkie"
     private val connectionsClient: ConnectionsClient = Nearby.getConnectionsClient(context)
     private val executor = Executors.newCachedThreadPool()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -68,7 +68,7 @@ class NearbyConnectionsBridge(
 
     private var eventSink: EventChannel.EventSink? = null
     private var roomId: String? = null
-    private var displayName: String = "Nakama Android"
+    private var displayName: String = "Nakama Sync Android"
     private var currentAudioStreamer: AudioStreamer? = null
     private var pendingStartSessionResult: MethodChannel.Result? = null
     private var isDiscovering = false

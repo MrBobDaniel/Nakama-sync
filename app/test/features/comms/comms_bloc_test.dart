@@ -1,7 +1,7 @@
-import 'package:app/features/comms/comms_bloc.dart';
-import 'package:app/features/comms/comms_event.dart';
-import 'package:app/features/comms/comms_state.dart';
-import 'package:app/features/comms/data/repositories/comms_transport_service.dart';
+import 'package:nakama_sync/features/comms/comms_bloc.dart';
+import 'package:nakama_sync/features/comms/comms_event.dart';
+import 'package:nakama_sync/features/comms/comms_state.dart';
+import 'package:nakama_sync/features/comms/data/repositories/comms_transport_service.dart';
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';

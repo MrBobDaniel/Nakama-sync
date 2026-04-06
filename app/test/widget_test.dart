@@ -1,14 +1,14 @@
 import 'dart:async';
 
-import 'package:app/core/audio/audio_engine.dart';
-import 'package:app/core/config/app_config.dart';
-import 'package:app/features/comms/comms_bloc.dart';
-import 'package:app/features/comms/comms_event.dart';
-import 'package:app/features/comms/data/repositories/comms_transport_service.dart';
-import 'package:app/features/music/data/models/song.dart';
-import 'package:app/features/music/data/repositories/music_repository.dart';
-import 'package:app/features/music/data/models/playlist.dart';
-import 'package:app/main.dart';
+import 'package:nakama_sync/core/audio/audio_engine.dart';
+import 'package:nakama_sync/core/config/app_config.dart';
+import 'package:nakama_sync/features/comms/comms_bloc.dart';
+import 'package:nakama_sync/features/comms/comms_event.dart';
+import 'package:nakama_sync/features/comms/data/repositories/comms_transport_service.dart';
+import 'package:nakama_sync/features/music/data/models/song.dart';
+import 'package:nakama_sync/features/music/data/repositories/music_repository.dart';
+import 'package:nakama_sync/features/music/data/models/playlist.dart';
+import 'package:nakama_sync/main.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -40,7 +40,7 @@ void main() {
     when(() => transportService.events).thenAnswer((_) => const Stream.empty());
 
     await tester.pumpWidget(
-      NakamaApp(
+      NakamaSyncApp(
         appConfig: const AppConfig(
           navidromeBaseUrl: 'http://localhost:4533',
           navidromeUsername: 'tester',
@@ -73,7 +73,7 @@ void main() {
     const song = Song(
       id: 'track-1',
       title: 'Warmup',
-      artist: 'Nakama',
+      artist: 'Nakama Sync',
       album: 'Gym Set',
       duration: 180,
       streamUrl: 'https://example.com/stream',
@@ -99,7 +99,7 @@ void main() {
     when(() => transportService.events).thenAnswer((_) => const Stream.empty());
 
     await tester.pumpWidget(
-      NakamaApp(
+      NakamaSyncApp(
         appConfig: const AppConfig(
           navidromeBaseUrl: 'http://localhost:4533',
           navidromeUsername: 'tester',
@@ -117,7 +117,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Warmup'), findsOneWidget);
-    expect(find.text('Nakama • Gym Set'), findsOneWidget);
+    expect(find.text('Nakama Sync • Gym Set'), findsOneWidget);
   });
 
   testWidgets('opens the comms lane from music', (WidgetTester tester) async {
@@ -134,7 +134,7 @@ void main() {
     when(() => transportService.events).thenAnswer((_) => const Stream.empty());
 
     await tester.pumpWidget(
-      NakamaApp(
+      NakamaSyncApp(
         appConfig: const AppConfig(
           navidromeBaseUrl: 'http://localhost:4533',
           navidromeUsername: 'tester',
@@ -179,7 +179,7 @@ void main() {
     ).thenAnswer((_) => transportEvents.stream);
 
     await tester.pumpWidget(
-      NakamaApp(
+      NakamaSyncApp(
         appConfig: const AppConfig(
           navidromeBaseUrl: 'http://localhost:4533',
           navidromeUsername: 'tester',
@@ -244,7 +244,7 @@ void main() {
     ).thenAnswer((_) => transportEvents.stream);
 
     await tester.pumpWidget(
-      NakamaApp(
+      NakamaSyncApp(
         appConfig: const AppConfig(
           navidromeBaseUrl: 'http://localhost:4533',
           navidromeUsername: 'tester',
@@ -321,7 +321,7 @@ void main() {
     ).thenAnswer((_) => transportEvents.stream);
 
     await tester.pumpWidget(
-      NakamaApp(
+      NakamaSyncApp(
         appConfig: const AppConfig(
           navidromeBaseUrl: 'http://localhost:4533',
           navidromeUsername: 'tester',

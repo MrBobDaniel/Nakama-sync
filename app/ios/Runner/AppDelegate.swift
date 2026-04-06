@@ -16,13 +16,13 @@ import UIKit
     let messenger = registrar.messenger()
 
     let methodChannel = FlutterMethodChannel(
-      name: "nakama.local/nearby_connections",
+      name: "nakama_sync.local/nearby_connections",
       binaryMessenger: messenger
     )
     methodChannel.setMethodCallHandler(nearbyConnectionsBridge.handle)
 
     let eventChannel = FlutterEventChannel(
-      name: "nakama.local/nearby_connections/events",
+      name: "nakama_sync.local/nearby_connections/events",
       binaryMessenger: messenger
     )
     eventChannel.setStreamHandler(nearbyConnectionsBridge)
