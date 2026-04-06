@@ -1,5 +1,46 @@
 import 'package:equatable/equatable.dart';
 
+class CommsPeer extends Equatable {
+  const CommsPeer({
+    required this.peerId,
+    required this.displayName,
+    this.isConnected = false,
+    this.isSpeaking = false,
+    this.streamSampleRate,
+  });
+
+  final String peerId;
+  final String displayName;
+  final bool isConnected;
+  final bool isSpeaking;
+  final int? streamSampleRate;
+
+  CommsPeer copyWith({
+    String? peerId,
+    String? displayName,
+    bool? isConnected,
+    bool? isSpeaking,
+    int? streamSampleRate,
+  }) {
+    return CommsPeer(
+      peerId: peerId ?? this.peerId,
+      displayName: displayName ?? this.displayName,
+      isConnected: isConnected ?? this.isConnected,
+      isSpeaking: isSpeaking ?? this.isSpeaking,
+      streamSampleRate: streamSampleRate ?? this.streamSampleRate,
+    );
+  }
+
+  @override
+  List<Object?> get props => [
+    peerId,
+    displayName,
+    isConnected,
+    isSpeaking,
+    streamSampleRate,
+  ];
+}
+
 class CommsDiagnosticEntry extends Equatable {
   const CommsDiagnosticEntry({
     required this.event,
@@ -71,6 +112,7 @@ abstract class CommsState extends Equatable {
 
   CommsDiagnostics get diagnostics;
   bool get isMicrophoneMuted;
+  List<CommsPeer> get peers => const <CommsPeer>[];
   bool get isSpeechActive => false;
 
   @override
@@ -99,6 +141,7 @@ class CommsSessionOpen extends CommsState {
     this.roomId, {
     this.statusMessage = 'Room is open for nearby connections.',
     this.isDiscovering = true,
+    this.peers = const <CommsPeer>[],
     this.diagnostics = const CommsDiagnostics(),
     this.isMicrophoneMuted = false,
   });
@@ -106,6 +149,8 @@ class CommsSessionOpen extends CommsState {
   final String roomId;
   final String statusMessage;
   final bool isDiscovering;
+  @override
+  final List<CommsPeer> peers;
   @override
   final CommsDiagnostics diagnostics;
   @override
@@ -115,6 +160,7 @@ class CommsSessionOpen extends CommsState {
     String? roomId,
     String? statusMessage,
     bool? isDiscovering,
+    List<CommsPeer>? peers,
     CommsDiagnostics? diagnostics,
     bool? isMicrophoneMuted,
   }) {
@@ -122,6 +168,7 @@ class CommsSessionOpen extends CommsState {
       roomId ?? this.roomId,
       statusMessage: statusMessage ?? this.statusMessage,
       isDiscovering: isDiscovering ?? this.isDiscovering,
+      peers: peers ?? this.peers,
       diagnostics: diagnostics ?? this.diagnostics,
       isMicrophoneMuted: isMicrophoneMuted ?? this.isMicrophoneMuted,
     );
@@ -132,6 +179,7 @@ class CommsSessionOpen extends CommsState {
     roomId,
     statusMessage,
     isDiscovering,
+    peers,
     diagnostics,
     isMicrophoneMuted,
   ];
@@ -144,6 +192,7 @@ class CommsConnected extends CommsState {
     this.isReceivingAudio = false,
     this.connectedPeers = 1,
     this.statusMessage = 'Connected over Nearby Connections.',
+    this.peers = const <CommsPeer>[],
     this.diagnostics = const CommsDiagnostics(),
     this.isMicrophoneMuted = false,
   });
@@ -153,6 +202,8 @@ class CommsConnected extends CommsState {
   final bool isReceivingAudio;
   final int connectedPeers;
   final String statusMessage;
+  @override
+  final List<CommsPeer> peers;
   @override
   final CommsDiagnostics diagnostics;
   @override
@@ -167,6 +218,7 @@ class CommsConnected extends CommsState {
     bool? isReceivingAudio,
     int? connectedPeers,
     String? statusMessage,
+    List<CommsPeer>? peers,
     CommsDiagnostics? diagnostics,
     bool? isMicrophoneMuted,
   }) {
@@ -176,6 +228,7 @@ class CommsConnected extends CommsState {
       isReceivingAudio: isReceivingAudio ?? this.isReceivingAudio,
       connectedPeers: connectedPeers ?? this.connectedPeers,
       statusMessage: statusMessage ?? this.statusMessage,
+      peers: peers ?? this.peers,
       diagnostics: diagnostics ?? this.diagnostics,
       isMicrophoneMuted: isMicrophoneMuted ?? this.isMicrophoneMuted,
     );
@@ -188,6 +241,7 @@ class CommsConnected extends CommsState {
     isReceivingAudio,
     connectedPeers,
     statusMessage,
+    peers,
     diagnostics,
     isMicrophoneMuted,
   ];

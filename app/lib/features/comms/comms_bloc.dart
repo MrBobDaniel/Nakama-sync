@@ -45,6 +45,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
         statusMessage: 'Opening room for nearby connections.',
         diagnostics: diagnostics,
         isMicrophoneMuted: state.isMicrophoneMuted,
+        peers: state.peers,
       ),
     );
 
@@ -249,6 +250,9 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       payload,
       fallback: state.diagnostics,
     );
+    final peers = _peersFromPayload(payload, fallback: state.peers);
+    final connectedPeerCount = _connectedPeerCount(payload, peers);
+    final isReceivingAudio = _receivingAudioFromPayload(payload, peers);
 
     switch (eventType) {
       case 'session_started':
@@ -260,6 +264,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
                   payload['message'] as String? ??
                   'Room is open and Nearby discovery is active.',
               isDiscovering: payload['isDiscovering'] as bool? ?? true,
+              peers: peers,
               diagnostics: diagnostics,
               isMicrophoneMuted: state.isMicrophoneMuted,
             ),
@@ -274,6 +279,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
                   payload['message'] as String? ??
                   'Room is open. Listening for incoming connections.',
               isDiscovering: false,
+              peers: peers,
               diagnostics: diagnostics,
             ),
           );
@@ -287,6 +293,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
               statusMessage:
                   payload['message'] as String? ?? 'Nearby peer found.',
               isDiscovering: payload['isDiscovering'] as bool? ?? true,
+              peers: peers,
               diagnostics: diagnostics,
               isMicrophoneMuted: state.isMicrophoneMuted,
             ),
@@ -297,10 +304,12 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
           emit(
             CommsConnected(
               roomId,
-              connectedPeers: payload['connectedPeers'] as int? ?? 1,
+              connectedPeers: connectedPeerCount,
+              isReceivingAudio: isReceivingAudio,
               statusMessage:
                   payload['message'] as String? ??
                   'Connected over Nearby Connections.',
+              peers: peers,
               diagnostics: diagnostics,
               isMicrophoneMuted: state.isMicrophoneMuted,
             ),
@@ -314,6 +323,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
               isTransmitting: payload['isTransmitting'] as bool? ?? false,
               statusMessage:
                   payload['message'] as String? ?? currentState.statusMessage,
+              connectedPeers: connectedPeerCount,
+              peers: peers,
               diagnostics: diagnostics,
             ),
           );
@@ -323,9 +334,11 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
         if (currentState is CommsConnected) {
           emit(
             currentState.copyWith(
-              isReceivingAudio: payload['isReceivingAudio'] as bool? ?? false,
+              isReceivingAudio: isReceivingAudio,
+              connectedPeers: connectedPeerCount,
               statusMessage:
                   payload['message'] as String? ?? currentState.statusMessage,
+              peers: peers,
               diagnostics: diagnostics,
             ),
           );
@@ -339,6 +352,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
                   payload['message'] as String? ??
                   'Peer disconnected. Room remains open for new connections.',
               isDiscovering: payload['isDiscovering'] as bool? ?? false,
+              peers: peers,
               diagnostics: diagnostics,
               isMicrophoneMuted: state.isMicrophoneMuted,
             ),
@@ -356,6 +370,48 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
           ),
         );
     }
+  }
+
+  List<CommsPeer> _peersFromPayload(
+    Map<String, dynamic> payload, {
+    required List<CommsPeer> fallback,
+  }) {
+    final rawPeers = payload['peers'];
+    if (rawPeers is! List) {
+      return fallback;
+    }
+
+    return rawPeers
+        .whereType<Map>()
+        .map(
+          (peer) => CommsPeer(
+            peerId: peer['peerId']?.toString() ?? 'unknown',
+            displayName:
+                peer['displayName']?.toString().trim().isNotEmpty == true
+                ? peer['displayName'].toString()
+                : 'Nearby peer',
+            isConnected: peer['isConnected'] as bool? ?? false,
+            isSpeaking: peer['isSpeaking'] as bool? ?? false,
+            streamSampleRate: peer['streamSampleRate'] as int?,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  int _connectedPeerCount(
+    Map<String, dynamic> payload,
+    List<CommsPeer> peers,
+  ) {
+    return payload['connectedPeers'] as int? ??
+        peers.where((peer) => peer.isConnected).length;
+  }
+
+  bool _receivingAudioFromPayload(
+    Map<String, dynamic> payload,
+    List<CommsPeer> peers,
+  ) {
+    return payload['isReceivingAudio'] as bool? ??
+        peers.any((peer) => peer.isSpeaking);
   }
 
   CommsDiagnostics _diagnosticsFromPayload(

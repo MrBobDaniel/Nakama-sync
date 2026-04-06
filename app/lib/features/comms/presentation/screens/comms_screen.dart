@@ -122,6 +122,8 @@ class _CommsScreenState extends State<CommsScreen> {
               state is CommsConnected && state.isReceivingAudio;
           final isMicrophoneMuted = state.isMicrophoneMuted;
           final isBroadcastActive = _isTalkLatched || _isMomentaryTalking;
+          final peers = state.peers;
+          final activeSpeakers = peers.where((peer) => peer.isSpeaking).toList();
           final roomId = switch (state) {
             CommsSessionOpen(:final roomId) => roomId,
             CommsConnected(:final roomId) => roomId,
@@ -194,7 +196,7 @@ class _CommsScreenState extends State<CommsScreen> {
                                     isTransmitting
                                         ? 'Transmitting to $connectedPeers peer(s) in room "$roomId".'
                                         : isReceivingAudio
-                                        ? 'Receiving voice audio from $connectedPeers peer(s) in room "$roomId".'
+                                        ? 'Receiving voice audio from ${activeSpeakers.length} active speaker(s) in room "$roomId".'
                                         : statusMessage,
                                   CommsFailure(:final message) => message,
                                   CommsInitial(:final statusMessage) =>
@@ -350,6 +352,10 @@ class _CommsScreenState extends State<CommsScreen> {
                       ],
                       const SizedBox(height: 24),
                       _DiagnosticsCard(state: state),
+                      if (peers.isNotEmpty) ...[
+                        const SizedBox(height: 20),
+                        _PeerListCard(peers: peers),
+                      ],
                       const SizedBox(height: 24),
                       Text(
                         switch (state) {
@@ -447,6 +453,10 @@ class _DiagnosticsCard extends StatelessWidget {
                 _DiagnosticChip(
                   label: 'peers',
                   value: '${diagnostics.connectedPeers}',
+                ),
+                _DiagnosticChip(
+                  label: 'speakers',
+                  value: '${state.peers.where((peer) => peer.isSpeaking).length}',
                 ),
               ],
             ),
@@ -708,6 +718,100 @@ class _AudioActivityBanner extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _PeerListCard extends StatelessWidget {
+  const _PeerListCard({required this.peers});
+
+  final List<CommsPeer> peers;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF131313),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Room Peers',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 12),
+            ...peers.map(
+              (peer) => Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: peer.isSpeaking
+                      ? Colors.blueAccent.withValues(alpha: 0.08)
+                      : Colors.white.withValues(alpha: 0.03),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: peer.isSpeaking
+                        ? Colors.blueAccent.withValues(alpha: 0.28)
+                        : Colors.white.withValues(alpha: 0.06),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 10,
+                      height: 10,
+                      decoration: BoxDecoration(
+                        color: peer.isSpeaking
+                            ? Colors.blueAccent
+                            : peer.isConnected
+                            ? Colors.greenAccent
+                            : Colors.grey,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            peer.displayName,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            peer.isSpeaking
+                                ? 'Speaking now'
+                                : peer.isConnected
+                                ? 'Connected'
+                                : 'Discovered',
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.65),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (peer.streamSampleRate case final int sampleRate)
+                      Text(
+                        '${sampleRate ~/ 1000} kHz',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.5),
+                          fontSize: 12,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
