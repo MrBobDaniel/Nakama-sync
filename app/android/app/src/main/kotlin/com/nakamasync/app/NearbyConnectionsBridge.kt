@@ -119,13 +119,15 @@ class NearbyConnectionsBridge(
             "startSession" -> {
                 val roomArgument = call.argument<String>("roomId")
                 val displayNameArgument = call.argument<String>("displayName")
-                if (roomArgument.isNullOrBlank() || displayNameArgument.isNullOrBlank()) {
+                val normalizedRoomId = roomArgument?.trim()
+                val normalizedDisplayName = displayNameArgument?.trim()
+                if (normalizedRoomId.isNullOrEmpty() || normalizedDisplayName.isNullOrEmpty()) {
                     result.error("invalid_arguments", "roomId and displayName are required.", null)
                     return
                 }
 
-                roomId = roomArgument
-                displayName = displayNameArgument
+                roomId = normalizedRoomId
+                displayName = normalizedDisplayName
                 startSession(result)
             }
 
@@ -204,7 +206,11 @@ class NearbyConnectionsBridge(
             return
         }
 
+        val requestedRoomId = roomId
+        val requestedDisplayName = displayName
         stopSession()
+        roomId = requestedRoomId
+        displayName = requestedDisplayName
 
         val osSessionResult = CommsSessionManager.startSession(
             context = context,
@@ -605,8 +611,9 @@ class NearbyConnectionsBridge(
             }
         }
 
-        val peerRoomId = json.optString("roomId")
-        if (roomId != null && peerRoomId != roomId) {
+        val localRoomId = roomId?.trim()
+        val peerRoomId = json.optString("roomId").trim().ifEmpty { null }
+        if (!localRoomId.isNullOrEmpty() && peerRoomId != localRoomId) {
             endpointRoomMatches[endpointId] = false
             activeEndpoints.remove(endpointId)
             outgoingAudioFanout?.removeEndpoint(endpointId)

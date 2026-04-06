@@ -31,6 +31,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   private var discoverer: Discoverer?
   private var connectedEndpoints = Set<EndpointID>()
   private var pendingOutgoingConnections = Set<EndpointID>()
+  private var pendingConnectionRequests = [EndpointID: DispatchWorkItem]()
   private var endpointRoomMatches = [EndpointID: Bool]()
   private var endpointAudioConfigs = [EndpointID: NearbyAudioConfig]()
   private var peerSessions = [EndpointID: PeerSession]()
@@ -59,8 +60,10 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     case "startSession":
       guard
         let arguments = call.arguments as? [String: Any],
-        let roomID = arguments["roomId"] as? String,
-        let displayName = arguments["displayName"] as? String
+        let roomID = (arguments["roomId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+        let displayName = (arguments["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !roomID.isEmpty,
+        !displayName.isEmpty
       else {
         result(
           FlutterError(
@@ -114,7 +117,11 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
 
   private func startSession(result: @escaping FlutterResult) {
     #if canImport(NearbyConnections)
+    let requestedRoomID = roomID
+    let requestedDisplayName = displayName
     stopSession()
+    roomID = requestedRoomID
+    displayName = requestedDisplayName
     let osSessionResult = commsSessionManager.startSession(
       roomID: roomID ?? "",
       displayName: displayName
@@ -264,6 +271,8 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     discoverer = nil
     connectedEndpoints.removeAll()
     pendingOutgoingConnections.removeAll()
+    pendingConnectionRequests.values.forEach { $0.cancel() }
+    pendingConnectionRequests.removeAll()
     endpointRoomMatches.removeAll()
     endpointAudioConfigs.removeAll()
     peerSessions.removeAll()
@@ -271,6 +280,8 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     discoveryStopWorkItem = nil
     isDiscovering = false
     commsSessionManager.stopSession()
+    roomID = nil
+    displayName = "Nakama Sync iPhone"
     #endif
   }
 
@@ -380,12 +391,14 @@ extension NearbyConnectionsBridge: AdvertiserDelegate {
     let remoteEndpoint = parseEndpointContext(context)
     endpointAudioConfigs[endpointID] = remoteEndpoint.audioConfig
     guard roomMatches(remoteEndpoint.roomID) else {
+      cancelPendingConnectionRequest(for: endpointID)
       endpointRoomMatches[endpointID] = false
       emit(event: "error", message: "Ignoring Nearby peer from a different room.")
       connectionRequestHandler(false)
       return
     }
 
+    cancelPendingConnectionRequest(for: endpointID)
     let remoteName = remoteEndpoint.displayName ?? "nearby peer"
     upsertPeer(endpointID: endpointID, displayName: remoteName)
     emit(event: "connection_initiated", message: "Connection initiated with \(remoteName).")
@@ -410,11 +423,11 @@ extension NearbyConnectionsBridge: DiscovererDelegate {
     let remoteName = remoteEndpoint.displayName ?? "nearby peer"
     upsertPeer(endpointID: endpointID, displayName: remoteName)
     emit(event: "peer_discovered", message: "Found nearby peer \(remoteName).")
-    pendingOutgoingConnections.insert(endpointID)
-    discoverer.requestConnection(to: endpointID, using: endpointContextData())
+    scheduleConnectionRequest(for: endpointID, remoteName: remoteName)
   }
 
   func discoverer(_ discoverer: Discoverer, didLose endpointID: EndpointID) {
+    cancelPendingConnectionRequest(for: endpointID)
     connectedEndpoints.remove(endpointID)
     pendingOutgoingConnections.remove(endpointID)
     endpointRoomMatches.removeValue(forKey: endpointID)
@@ -439,10 +452,12 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
     from endpointID: EndpointID,
     verificationHandler: @escaping (Bool) -> Void
   ) {
+    cancelPendingConnectionRequest(for: endpointID)
     verificationHandler(true)
   }
 
   func connectionManager(_ connectionManager: ConnectionManager, didChangeTo state: ConnectionState, for endpointID: EndpointID) {
+    cancelPendingConnectionRequest(for: endpointID)
     pendingOutgoingConnections.remove(endpointID)
     switch state {
     case .connected:
@@ -593,6 +608,7 @@ private extension NearbyConnectionsBridge {
     if let normalizedRoomID, !normalizedRoomID.isEmpty, peerRoomID != normalizedRoomID {
       endpointRoomMatches[endpointID] = false
       connectedEndpoints.remove(endpointID)
+      cancelPendingConnectionRequest(for: endpointID)
       pendingOutgoingConnections.remove(endpointID)
       audioController.handleEndpointDisconnected(endpointID)
       removePeer(endpointID)
@@ -674,6 +690,40 @@ private extension NearbyConnectionsBridge {
 
   func disconnect(_ endpointID: EndpointID) {
     connectionManager.disconnect(from: endpointID)
+  }
+
+  func scheduleConnectionRequest(for endpointID: EndpointID, remoteName: String) {
+    guard !connectedEndpoints.contains(endpointID) else { return }
+    guard !pendingOutgoingConnections.contains(endpointID) else { return }
+
+    cancelPendingConnectionRequest(for: endpointID)
+    let delayMillis = outboundConnectionDelayMillis(for: endpointID)
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.pendingConnectionRequests.removeValue(forKey: endpointID)
+      guard !self.connectedEndpoints.contains(endpointID) else { return }
+
+      self.pendingOutgoingConnections.insert(endpointID)
+      self.discoverer?.requestConnection(to: endpointID, using: self.endpointContextData())
+      self.emit(
+        event: "session_started",
+        message: "Requesting a Nearby connection to \(remoteName).",
+        extra: ["isDiscovering": self.isDiscovering]
+      )
+    }
+
+    pendingConnectionRequests[endpointID] = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(delayMillis), execute: workItem)
+  }
+
+  func cancelPendingConnectionRequest(for endpointID: EndpointID) {
+    pendingConnectionRequests.removeValue(forKey: endpointID)?.cancel()
+  }
+
+  func outboundConnectionDelayMillis(for endpointID: EndpointID) -> Int {
+    let baseDelay = 600
+    let jitter = abs(endpointID.hashValue % 250)
+    return baseDelay + jitter
   }
 
   struct NearbyEndpointContext {
