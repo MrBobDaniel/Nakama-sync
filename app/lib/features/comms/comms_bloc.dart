@@ -343,6 +343,31 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             ),
           );
         }
+      case 'os_session_state':
+        switch (state) {
+          case CommsConnected currentState:
+            emit(
+              currentState.copyWith(
+                isReceivingAudio: isReceivingAudio,
+                connectedPeers: connectedPeerCount,
+                statusMessage:
+                    payload['message'] as String? ?? currentState.statusMessage,
+                peers: peers,
+                diagnostics: diagnostics,
+              ),
+            );
+          case CommsSessionOpen currentState:
+            emit(
+              currentState.copyWith(
+                statusMessage:
+                    payload['message'] as String? ?? currentState.statusMessage,
+                peers: peers,
+                diagnostics: diagnostics,
+              ),
+            );
+          default:
+            break;
+        }
       case 'disconnected':
         if (roomId != null) {
           emit(

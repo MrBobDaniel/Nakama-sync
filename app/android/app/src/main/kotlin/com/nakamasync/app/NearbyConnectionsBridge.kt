@@ -91,6 +91,29 @@ class NearbyConnectionsBridge(
     private var discoveryStopRunnable: Runnable? = null
     private var isPushToTalkActive = false
 
+    init {
+        CommsSessionManager.setListener(
+            object : CommsSessionManager.Listener {
+                override fun onSystemSessionEnded(reason: String) {
+                    mainHandler.post {
+                        if (roomId == null) {
+                            return@post
+                        }
+                        emit(
+                            "error",
+                            reason,
+                            mapOf(
+                                "isPersistentSessionActive" to false,
+                                "isTelecomCallActive" to false,
+                            ),
+                        )
+                        stopSession()
+                    }
+                }
+            },
+        )
+    }
+
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "startSession" -> {
@@ -130,6 +153,7 @@ class NearbyConnectionsBridge(
 
     fun dispose() {
         stopSession()
+        CommsSessionManager.setListener(null)
         pendingStartSessionResult?.error("cancelled", "Nearby session setup was cancelled.", null)
         pendingStartSessionResult = null
         executor.shutdownNow()
@@ -181,6 +205,20 @@ class NearbyConnectionsBridge(
         }
 
         stopSession()
+
+        val osSessionResult = CommsSessionManager.startSession(
+            context = context,
+            roomId = roomId.orEmpty(),
+            displayName = displayName,
+        )
+        emit(
+            "os_session_state",
+            osSessionResult.message,
+            mapOf(
+                "isPersistentSessionActive" to osSessionResult.isForegroundServiceActive,
+                "isTelecomCallActive" to osSessionResult.isConnectionServiceActive,
+            ),
+        )
 
         emit("session_started", "Opening room and starting Nearby advertising.", mapOf("isDiscovering" to true))
 
@@ -266,6 +304,8 @@ class NearbyConnectionsBridge(
         connectionsClient.stopAllEndpoints()
         connectionsClient.stopAdvertising()
         connectionsClient.stopDiscovery()
+        CommsSessionManager.stopSession(context)
+        roomId = null
     }
 
     private fun isPlayServicesAvailable(): Boolean {
@@ -315,6 +355,18 @@ class NearbyConnectionsBridge(
                 },
         )
         payload.putAll(extra)
+        CommsSessionManager.updateSessionState(context) { current ->
+            current.copy(
+                roomId = roomId,
+                displayName = displayName,
+                connectedPeers = activeEndpoints.count { endpointRoomMatches[it] == true },
+                isDiscovering = isDiscovering,
+                isReceivingAudio = peerSessions.values.any { it.isSpeaking && it.isConnected },
+                isTransmitting = outgoingAudioFanout?.isRunning() == true,
+                statusMessage = message,
+                isSessionOpen = roomId != null,
+            )
+        }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             eventSink?.success(payload)
             return

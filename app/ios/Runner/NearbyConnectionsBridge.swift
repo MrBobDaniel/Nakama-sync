@@ -8,6 +8,16 @@ import NearbyConnections
 
 final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   private let serviceID = "com.nakamasync.app.walkie"
+  private lazy var commsSessionManager = IOSCommsSessionManager(
+    onStateChanged: { [weak self] message, extra in
+      self?.emit(event: "os_session_state", message: message, extra: extra)
+    },
+    onSystemSessionEnded: { [weak self] reason in
+      guard let self else { return }
+      self.emit(event: "error", message: reason)
+      self.stopSession()
+    }
+  )
   private var roomID: String?
   private var displayName = "Nakama Sync iPhone"
   private var eventSink: FlutterEventSink?
@@ -28,6 +38,10 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   private var isPushToTalkActive = false
   private var discoveryStopWorkItem: DispatchWorkItem?
   private lazy var audioController = NearbyAudioController(
+    prepareAudioSession: { [weak self] in
+      guard let self else { return }
+      try self.commsSessionManager.prepareForVoiceAudio()
+    },
     onError: { [weak self] message in
       self?.emit(event: "error", message: message)
     },
@@ -98,6 +112,19 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   private func startSession(result: @escaping FlutterResult) {
     #if canImport(NearbyConnections)
     stopSession()
+    let osSessionResult = commsSessionManager.startSession(
+      roomID: roomID ?? "",
+      displayName: displayName
+    )
+    emit(
+      event: "os_session_state",
+      message: osSessionResult.message,
+      extra: [
+        "isPersistentSessionActive": osSessionResult.isCallKitActive,
+        "isCallKitActive": osSessionResult.isCallKitActive,
+        "isAudioSessionConfigured": osSessionResult.isAudioSessionConfigured,
+      ]
+    )
     connectionManager.delegate = self
     emit(
       event: "session_started",
@@ -178,6 +205,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
             Set(validatedEndpoints),
             connectionManager: self.connectionManager
           )
+          self.syncOSAudioState()
           self.emit(
             event: "transmit_state",
             message: "Streaming microphone audio to \(validatedEndpoints.count) peer(s).",
@@ -205,6 +233,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
         sendControlPayload(type: "audio_stop", to: endpointID)
       }
       audioController.stopTransmitting()
+      syncOSAudioState()
       emit(event: "transmit_state", message: "Push-to-talk stream is idle.", extra: [
         "isTransmitting": false
       ])
@@ -238,6 +267,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     discoveryStopWorkItem?.cancel()
     discoveryStopWorkItem = nil
     isDiscovering = false
+    commsSessionManager.stopSession()
     #endif
   }
 
@@ -298,6 +328,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     }
     peer.isSpeaking = isSpeaking
     peerSessions[endpointID] = peer
+    syncOSAudioState()
     emit(
       event: "receive_state",
       message: isSpeaking ? "\(peer.displayName) is speaking." : "\(peer.displayName) stopped speaking.",
@@ -325,6 +356,13 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     @unknown default:
       completion(false)
     }
+  }
+
+  private func syncOSAudioState() {
+    commsSessionManager.updateAudioState(
+      isReceivingAudio: peerSessions.values.contains { $0.isConnected && $0.isSpeaking },
+      isTransmitting: audioController.isTransmitting
+    )
   }
 }
 
@@ -680,6 +718,7 @@ private extension NearbyConnectionsBridge {
 }
 
 private final class NearbyAudioController {
+  private let prepareAudioSession: () throws -> Void
   private let onError: (String) -> Void
   private let onPeerSpeakingChanged: (EndpointID, Bool) -> Void
   private let transmitQueueKey = DispatchSpecificKey<Void>()
@@ -688,7 +727,6 @@ private final class NearbyAudioController {
   private let transmitQueue = DispatchQueue(label: "nakama_sync.nearby.audio.tx")
   private let receiveQueue = DispatchQueue(label: "nakama_sync.nearby.audio.rx")
   private let playbackQueue = DispatchQueue(label: "nakama_sync.nearby.audio.playback")
-  private let session = AVAudioSession.sharedInstance()
   private let streamSampleRate = Double(16_000)
   private let frameSamples = 320
   private let frameByteCount = 640
@@ -726,9 +764,11 @@ private final class NearbyAudioController {
   }
 
   init(
+    prepareAudioSession: @escaping () throws -> Void,
     onError: @escaping (String) -> Void,
     onPeerSpeakingChanged: @escaping (EndpointID, Bool) -> Void
   ) {
+    self.prepareAudioSession = prepareAudioSession
     self.onError = onError
     self.onPeerSpeakingChanged = onPeerSpeakingChanged
     transmitQueue.setSpecific(key: transmitQueueKey, value: ())
@@ -843,22 +883,6 @@ private final class NearbyAudioController {
     }
   }
 
-  private func configureAudioSession() throws {
-    try session.setCategory(
-      .playAndRecord,
-      mode: .voiceChat,
-      options: [
-        .defaultToSpeaker,
-        .allowBluetooth,
-        .duckOthers,
-      ]
-    )
-    try session.setPreferredSampleRate(streamSampleRate)
-    try session.setPreferredIOBufferDuration(0.01)
-    try session.setActive(true)
-    try? session.overrideOutputAudioPort(.speaker)
-  }
-
   private func configureAudioEngineIfNeeded() throws {
     guard !isConfigured else {
       return
@@ -870,7 +894,7 @@ private final class NearbyAudioController {
   }
 
   private func prepareAudioGraph() throws {
-    try configureAudioSession()
+    try prepareAudioSession()
   }
 
   private func ensureCaptureTapRunning() throws {
