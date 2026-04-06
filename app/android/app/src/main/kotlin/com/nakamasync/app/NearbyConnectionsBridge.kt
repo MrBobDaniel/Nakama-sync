@@ -4,7 +4,6 @@ import android.Manifest
 import android.app.Activity
 import android.bluetooth.BluetoothManager
 import android.content.Context
-import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
@@ -18,6 +17,7 @@ import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
@@ -46,6 +46,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import android.net.wifi.WifiManager
+import org.json.JSONArray
 import org.json.JSONObject
 
 class NearbyConnectionsBridge(
@@ -62,6 +63,7 @@ class NearbyConnectionsBridge(
     private val discoveredEndpoints = ConcurrentHashMap.newKeySet<String>()
     private val receivedStreams = ConcurrentHashMap<Long, Payload>()
     private val endpointRoomMatches = ConcurrentHashMap<String, Boolean>()
+    private val endpointAudioConfigs = ConcurrentHashMap<String, NearbyAudioConfig>()
     private val pendingOutgoingConnections = ConcurrentHashMap.newKeySet<String>()
     private val pendingConnectionRequests = ConcurrentHashMap<String, Runnable>()
     private val incomingAudioPlaybacks = ConcurrentHashMap<String, IncomingAudioPlayback>()
@@ -196,10 +198,12 @@ class NearbyConnectionsBridge(
 
         if (isActive) {
             if (currentAudioStreamer == null) {
+                val negotiatedSampleRate = negotiatedSampleRateForEndpoint(endpointId)
                 currentAudioStreamer = AudioStreamer(
                     context = context,
                     connectionsClient = connectionsClient,
                     endpointId = endpointId,
+                    sampleRate = negotiatedSampleRate,
                     audioFocusController = audioFocusController,
                     onEnded = {
                         currentAudioStreamer = null
@@ -207,7 +211,14 @@ class NearbyConnectionsBridge(
                     },
                 ).also { streamer ->
                     streamer.start()
-                    emit("transmit_state", "Streaming microphone audio over Nearby Connections.", mapOf("isTransmitting" to true))
+                    emit(
+                        "transmit_state",
+                        "Streaming microphone audio over Nearby Connections.",
+                        mapOf(
+                            "isTransmitting" to true,
+                            "audioSampleRate" to negotiatedSampleRate,
+                        ),
+                    )
                 }
             }
         } else {
@@ -229,6 +240,7 @@ class NearbyConnectionsBridge(
         discoveredEndpoints.clear()
         receivedStreams.clear()
         endpointRoomMatches.clear()
+        endpointAudioConfigs.clear()
         pendingOutgoingConnections.clear()
         pendingConnectionRequests.values.forEach(mainHandler::removeCallbacks)
         pendingConnectionRequests.clear()
@@ -296,6 +308,7 @@ class NearbyConnectionsBridge(
             }
 
             val remoteEndpoint = parseEndpointInfo(info.endpointInfo)
+            endpointAudioConfigs[endpointId] = remoteEndpoint.audioConfig
             if (!roomMatches(remoteEndpoint.roomId)) {
                 return
             }
@@ -320,6 +333,7 @@ class NearbyConnectionsBridge(
         override fun onConnectionInitiated(endpointId: String, info: ConnectionInfo) {
             cancelPendingConnectionRequest(endpointId)
             val remoteEndpoint = parseEndpointInfo(info.endpointInfo)
+            endpointAudioConfigs[endpointId] = remoteEndpoint.audioConfig
             if (!roomMatches(remoteEndpoint.roomId)) {
                 endpointRoomMatches[endpointId] = false
                 connectionsClient.rejectConnection(endpointId)
@@ -362,6 +376,7 @@ class NearbyConnectionsBridge(
             cancelPendingConnectionRequest(endpointId)
             activeEndpoints.remove(endpointId)
             endpointRoomMatches.remove(endpointId)
+            endpointAudioConfigs.remove(endpointId)
             incomingAudioPlaybacks.remove(endpointId)?.stop()
             emit("disconnected", "Nearby peer disconnected. Room remains open for new connections.")
             startDiscoveryBurst("Peer disconnected. Scanning briefly for another nearby peer.")
@@ -408,9 +423,17 @@ class NearbyConnectionsBridge(
         IncomingAudioPlayback(
             context = context,
             payload = payload,
+            sampleRate = negotiatedSampleRateForEndpoint(endpointId),
             audioFocusController = audioFocusController,
             onStarted = {
-                emit("receive_state", "Receiving nearby voice audio.", mapOf("isReceivingAudio" to true))
+                emit(
+                    "receive_state",
+                    "Receiving nearby voice audio.",
+                    mapOf(
+                        "isReceivingAudio" to true,
+                        "audioSampleRate" to negotiatedSampleRateForEndpoint(endpointId),
+                    ),
+                )
             },
             onEnded = {
                 incomingAudioPlaybacks.remove(endpointId)
@@ -423,10 +446,13 @@ class NearbyConnectionsBridge(
     }
 
     private fun sendAudioControl(endpointId: String, type: String) {
+        val localAudioConfig = buildLocalAudioConfig()
         val payload = JSONObject()
             .put("type", type)
             .put("roomId", roomId)
             .put("displayName", displayName)
+            .put("preferredSampleRate", localAudioConfig.preferredSampleRate)
+            .put("supportedSampleRates", JSONArray(localAudioConfig.supportedSampleRates))
             .toString()
             .toByteArray(Charsets.UTF_8)
 
@@ -434,10 +460,13 @@ class NearbyConnectionsBridge(
     }
 
     private fun sendHandshake(endpointId: String) {
+        val localAudioConfig = buildLocalAudioConfig()
         val handshake = JSONObject()
             .put("type", "hello")
             .put("roomId", roomId)
             .put("displayName", displayName)
+            .put("preferredSampleRate", localAudioConfig.preferredSampleRate)
+            .put("supportedSampleRates", JSONArray(localAudioConfig.supportedSampleRates))
             .toString()
             .toByteArray(Charsets.UTF_8)
 
@@ -480,17 +509,25 @@ class NearbyConnectionsBridge(
         }
 
         endpointRoomMatches[endpointId] = true
+        endpointAudioConfigs[endpointId] = parseAudioConfig(json)
+        val negotiatedSampleRate = negotiatedSampleRateForEndpoint(endpointId)
         emit(
             "bytes_received",
             "Nearby peer metadata received.",
-            mapOf("peerDisplayName" to json.optString("displayName")),
+            mapOf(
+                "peerDisplayName" to json.optString("displayName"),
+                "audioSampleRate" to negotiatedSampleRate,
+            ),
         )
     }
 
     private fun localEndpointInfo(): ByteArray {
+        val localAudioConfig = buildLocalAudioConfig()
         return JSONObject()
             .put("roomId", roomId)
             .put("displayName", displayName)
+            .put("preferredSampleRate", localAudioConfig.preferredSampleRate)
+            .put("supportedSampleRates", JSONArray(localAudioConfig.supportedSampleRates))
             .toString()
             .toByteArray(Charsets.UTF_8)
     }
@@ -513,7 +550,74 @@ class NearbyConnectionsBridge(
         return NearbyEndpointInfo(
             roomId = json.optString("roomId").ifBlank { null },
             displayName = json.optString("displayName").ifBlank { null },
+            audioConfig = parseAudioConfig(json),
         )
+    }
+
+    private fun parseAudioConfig(json: JSONObject): NearbyAudioConfig {
+        val supportedRatesJson = json.optJSONArray("supportedSampleRates")
+        val supportedSampleRates = mutableListOf<Int>()
+        if (supportedRatesJson != null) {
+            for (index in 0 until supportedRatesJson.length()) {
+                val rate = supportedRatesJson.optInt(index)
+                if (rate > 0) {
+                    supportedSampleRates.add(rate)
+                }
+            }
+        }
+
+        return NearbyAudioConfig(
+            preferredSampleRate = json.optInt("preferredSampleRate", DEFAULT_STREAM_SAMPLE_RATE),
+            supportedSampleRates = supportedSampleRates,
+        )
+    }
+
+    private fun buildLocalAudioConfig(): NearbyAudioConfig {
+        val supportedSampleRates = STREAM_SAMPLE_RATE_CANDIDATES.filter { sampleRate ->
+            supportsStreamSampleRate(sampleRate)
+        }.ifEmpty {
+            listOf(DEFAULT_STREAM_SAMPLE_RATE)
+        }
+
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val routeSampleRate = audioManager
+            .getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
+            ?.toIntOrNull()
+        val preferredSampleRate = when {
+            routeSampleRate != null && supportedSampleRates.contains(routeSampleRate) -> routeSampleRate
+            supportedSampleRates.contains(PREFERRED_LOW_LATENCY_SAMPLE_RATE) -> PREFERRED_LOW_LATENCY_SAMPLE_RATE
+            else -> supportedSampleRates.first()
+        }
+
+        return NearbyAudioConfig(
+            preferredSampleRate = preferredSampleRate,
+            supportedSampleRates = supportedSampleRates,
+        )
+    }
+
+    private fun supportsStreamSampleRate(sampleRate: Int): Boolean {
+        val recordMinBufferSize = AudioRecord.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        val trackMinBufferSize = AudioTrack.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        return recordMinBufferSize > 0 && trackMinBufferSize > 0
+    }
+
+    private fun negotiatedSampleRateForEndpoint(endpointId: String): Int {
+        val localAudioConfig = buildLocalAudioConfig()
+        val remoteAudioConfig = endpointAudioConfigs[endpointId] ?: NearbyAudioConfig()
+        val localSupported = localAudioConfig.supportedSampleRates.toSet()
+        val remoteSupported = remoteAudioConfig.supportedSampleRates.toSet()
+
+        return STREAM_SAMPLE_RATE_CANDIDATES.firstOrNull { sampleRate ->
+            localSupported.contains(sampleRate) && remoteSupported.contains(sampleRate)
+        } ?: DEFAULT_STREAM_SAMPLE_RATE
     }
 
     private fun startDiscoveryBurst(message: String) {
@@ -678,11 +782,18 @@ class NearbyConnectionsBridge(
     private data class NearbyEndpointInfo(
         val roomId: String? = null,
         val displayName: String? = null,
+        val audioConfig: NearbyAudioConfig = NearbyAudioConfig(),
+    )
+
+    private data class NearbyAudioConfig(
+        val preferredSampleRate: Int = DEFAULT_STREAM_SAMPLE_RATE,
+        val supportedSampleRates: List<Int> = listOf(DEFAULT_STREAM_SAMPLE_RATE),
     )
 
     private class IncomingAudioPlayback(
         private val context: Context,
         payload: Payload,
+        private val sampleRate: Int,
         private val audioFocusController: AudioFocusController,
         private val onStarted: () -> Unit,
         private val onEnded: () -> Unit,
@@ -692,6 +803,9 @@ class NearbyConnectionsBridge(
         private val readExecutor = Executors.newSingleThreadExecutor()
         private val playbackExecutor = Executors.newSingleThreadExecutor()
         private val frameLock = Object()
+        private val streamChunkBytes =
+            sampleRate * PCM_BYTES_PER_SAMPLE * STREAM_CHUNK_MILLIS / 1_000
+        private val playbackBufferBytes = streamChunkBytes * DEFAULT_BUFFER_CHUNKS
         private var latestFrame: ByteArray? = null
 
         fun start(executor: java.util.concurrent.Executor) {
@@ -707,7 +821,7 @@ class NearbyConnectionsBridge(
                 audioFocusController.acquire()
                 onStarted()
                 val minBufferSize = AudioTrack.getMinBufferSize(
-                    SAMPLE_RATE,
+                    sampleRate,
                     AudioFormat.CHANNEL_OUT_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
                 )
@@ -721,16 +835,29 @@ class NearbyConnectionsBridge(
                     .setAudioFormat(
                         AudioFormat.Builder()
                             .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(SAMPLE_RATE)
+                            .setSampleRate(sampleRate)
                             .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                             .build(),
                     )
                     .setTransferMode(AudioTrack.MODE_STREAM)
-                    .setBufferSizeInBytes(minBufferSize.coerceAtLeast(PLAYBACK_BUFFER_BYTES))
-                    .applyLowLatencyPerformanceMode()
+                    .setBufferSizeInBytes(
+                        minBufferSize.coerceAtLeast(playbackBufferBytes),
+                    )
                     .build()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N &&
+                    supportsLowLatencyAudio(context)
+                ) {
+                    val preferredFrames = preferredOutputFramesPerBuffer(audioManager)
+                    val targetFrames = maxOf(
+                        (sampleRate * STREAM_CHUNK_MILLIS / 1_000) * LOW_LATENCY_BUFFER_CHUNKS,
+                        preferredFrames ?: 0,
+                    )
+                    if (targetFrames > 0) {
+                        audioTrack.setBufferSizeInFrames(targetFrames)
+                    }
+                }
 
-                val buffer = ByteArray(STREAM_CHUNK_BYTES)
+                val buffer = ByteArray(streamChunkBytes)
 
                 try {
                     audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
@@ -817,6 +944,7 @@ class NearbyConnectionsBridge(
         private val context: Context,
         private val connectionsClient: ConnectionsClient,
         private val endpointId: String,
+        private val sampleRate: Int,
         private val audioFocusController: AudioFocusController,
         private val onEnded: () -> Unit,
     ) {
@@ -825,6 +953,9 @@ class NearbyConnectionsBridge(
         private val senderExecutor = Executors.newSingleThreadExecutor()
         private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         private val frameLock = Object()
+        private val streamChunkFrames = sampleRate * STREAM_CHUNK_MILLIS / 1_000
+        private val streamChunkBytes = streamChunkFrames * PCM_BYTES_PER_SAMPLE
+        private val captureBufferBytes = streamChunkBytes * DEFAULT_BUFFER_CHUNKS
 
         private var audioRecord: AudioRecord? = null
         private var payload: Payload? = null
@@ -850,23 +981,31 @@ class NearbyConnectionsBridge(
             audioManager.isMicrophoneMute = false
 
             val minBufferSize = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE,
+                sampleRate,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
             )
 
-            val record = AudioRecord.Builder()
-                .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+            val requestedCaptureBufferBytes = if (supportsLowLatencyAudio(context)) {
+                minBufferSize.coerceAtLeast(streamChunkBytes * LOW_LATENCY_BUFFER_CHUNKS)
+            } else {
+                minBufferSize.coerceAtLeast(captureBufferBytes)
+            }
+
+            val recordBuilder = AudioRecord.Builder()
+                .setAudioSource(selectCaptureAudioSource())
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(SAMPLE_RATE)
+                        .setSampleRate(sampleRate)
                         .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
                         .build(),
                 )
-                .setBufferSizeInBytes(minBufferSize.coerceAtLeast(CAPTURE_BUFFER_BYTES))
-                .applyLowLatencyPerformanceMode()
-                .build()
+                .setBufferSizeInBytes(requestedCaptureBufferBytes)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                recordBuilder.setPrivacySensitive(true)
+            }
+            val record = recordBuilder.build()
             audioRecord = record
             attachVoiceEffects(record.audioSessionId)
 
@@ -881,7 +1020,7 @@ class NearbyConnectionsBridge(
             }
 
             captureExecutor.execute {
-                val buffer = ByteArray(STREAM_CHUNK_BYTES)
+                val buffer = ByteArray(streamChunkBytes)
 
                 try {
                     record.startRecording()
@@ -978,6 +1117,14 @@ class NearbyConnectionsBridge(
                 }
             }
         }
+
+        private fun selectCaptureAudioSource(): Int {
+            return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                MediaRecorder.AudioSource.VOICE_PERFORMANCE
+            } else {
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION
+            }
+        }
     }
 
     private class AudioFocusController(
@@ -1044,32 +1191,31 @@ class NearbyConnectionsBridge(
         }
     }
 
-    private fun AudioTrack.Builder.applyLowLatencyPerformanceMode(): AudioTrack.Builder {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-        }
-        return this
-    }
-
-    private fun AudioRecord.Builder.applyLowLatencyPerformanceMode(): AudioRecord.Builder {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            setPerformanceMode(AudioRecord.PERFORMANCE_MODE_LOW_LATENCY)
-        }
-        return this
-    }
-
     companion object {
         private const val REQUEST_PERMISSIONS_CODE = 3_101
-        private const val SAMPLE_RATE = 16_000
+        private const val DEFAULT_STREAM_SAMPLE_RATE = 16_000
+        private const val PREFERRED_LOW_LATENCY_SAMPLE_RATE = 48_000
         private const val PCM_BYTES_PER_SAMPLE = 2
         private const val STREAM_CHUNK_MILLIS = 20
-        private const val STREAM_CHUNK_BYTES =
-            SAMPLE_RATE * PCM_BYTES_PER_SAMPLE * STREAM_CHUNK_MILLIS / 1_000
-        private const val CAPTURE_BUFFER_BYTES = STREAM_CHUNK_BYTES * 4
-        private const val PLAYBACK_BUFFER_BYTES = STREAM_CHUNK_BYTES * 4
+        private const val LOW_LATENCY_BUFFER_CHUNKS = 2
+        private const val DEFAULT_BUFFER_CHUNKS = 4
         private const val FRAME_WAIT_MILLIS = 10L
         private const val DISCOVERY_WINDOW_MILLIS = 15_000L
         private const val CONNECTION_REQUEST_DELAY_MILLIS = 250L
         private const val CONNECTION_RETRY_DELAY_MILLIS = 2_000L
+        private val STREAM_SAMPLE_RATE_CANDIDATES = listOf(48_000, 44_100, 32_000, 24_000, 16_000, 8_000)
     }
+}
+
+private fun preferredOutputFramesPerBuffer(audioManager: AudioManager): Int? {
+    return audioManager
+        .getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)
+        ?.toIntOrNull()
+        ?.takeIf { it > 0 }
+}
+
+private fun supportsLowLatencyAudio(context: Context): Boolean {
+    val packageManager = context.packageManager
+    return packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_AUDIO_LOW_LATENCY) ||
+        packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_AUDIO_PRO)
 }
