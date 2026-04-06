@@ -308,6 +308,7 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
     switch state {
     case .connected:
       connectedEndpoints.insert(endpointID)
+      endpointRoomMatches[endpointID] = true
       stopDiscovery()
       sendHandshake(to: endpointID)
       emit(event: "connected", message: "Connected to nearby peer over Nearby Connections.", extra: [
@@ -526,7 +527,9 @@ private final class NearbyAudioController {
   private let eventHandler: (String, String, [String: Any]) -> Void
   private let audioEngine = AVAudioEngine()
   private let playerNode = AVAudioPlayerNode()
-  private let audioQueue = DispatchQueue(label: "nakama.nearby.audio")
+  private let transmitQueue = DispatchQueue(label: "nakama.nearby.audio.tx")
+  private let receiveQueue = DispatchQueue(label: "nakama.nearby.audio.rx")
+  private let playbackQueue = DispatchQueue(label: "nakama.nearby.audio.playback")
   private let session = AVAudioSession.sharedInstance()
   private let captureFormat = AVAudioFormat(
     commonFormat: .pcmFormatInt16,
@@ -540,8 +543,8 @@ private final class NearbyAudioController {
     channels: 1,
     interleaved: false
   )!
-  private let maxStalledOutputWrites = 32
-  private let stalledOutputRetryInterval = 0.002
+  private let maxStalledOutputWrites = 4
+  private let stalledOutputRetryInterval = 0.001
 
   private var captureConverter: AVAudioConverter?
   private var outboundEndpoint: EndpointID?
@@ -550,12 +553,15 @@ private final class NearbyAudioController {
   private var inboundReaders = [EndpointID: IncomingAudioStreamReader]()
   private var isConfigured = false
   private var isTransmitting = false
+  private var queuedPlaybackFrames: AVAudioFramePosition = 0
+  private var teardownWorkItem: DispatchWorkItem?
 
   init(eventHandler: @escaping (String, String, [String: Any]) -> Void) {
     self.eventHandler = eventHandler
   }
 
   func startTransmitting(to endpointID: EndpointID, connectionManager: ConnectionManager) throws {
+    cancelTeardown()
     try configureAudioSession()
     try configureAudioEngineIfNeeded()
 
@@ -582,7 +588,7 @@ private final class NearbyAudioController {
     captureConverter = converter
 
     inputNode.removeTap(onBus: 0)
-    inputNode.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { [weak self] buffer, _ in
+    inputNode.installTap(onBus: 0, bufferSize: 320, format: inputFormat) { [weak self] buffer, _ in
       self?.writeCapturedAudio(buffer)
     }
 
@@ -613,11 +619,12 @@ private final class NearbyAudioController {
 
   func handleIncomingStream(_ stream: InputStream, from endpointID: EndpointID) {
     do {
+      cancelTeardown()
       try configureAudioSession()
       try configureAudioEngineIfNeeded()
       let reader = IncomingAudioStreamReader(
         stream: stream,
-        queue: audioQueue,
+        queue: receiveQueue,
         onAudioData: { [weak self] data in
           self?.schedulePlayback(for: data)
         },
@@ -660,6 +667,7 @@ private final class NearbyAudioController {
     }
 
     inboundReaders.removeValue(forKey: endpointID)?.stop()
+    flushPlayback()
     tearDownAudioIfIdle()
   }
 
@@ -672,6 +680,7 @@ private final class NearbyAudioController {
 
   func stopIncomingAudio(from endpointID: EndpointID) {
     inboundReaders.removeValue(forKey: endpointID)?.stop()
+    flushPlayback()
     tearDownAudioIfIdle()
   }
 
@@ -682,12 +691,11 @@ private final class NearbyAudioController {
       options: [
         .defaultToSpeaker,
         .allowBluetooth,
-        .allowBluetoothA2DP,
         .duckOthers,
       ]
     )
     try session.setPreferredSampleRate(16_000)
-    try session.setPreferredIOBufferDuration(0.02)
+    try session.setPreferredIOBufferDuration(0.01)
     try session.setActive(true)
     try? session.overrideOutputAudioPort(.speaker)
   }
@@ -752,7 +760,7 @@ private final class NearbyAudioController {
 
     let byteCount = Int(convertedBuffer.frameLength) * MemoryLayout<Int16>.stride
     let audioData = Data(bytes: channelData[0], count: byteCount)
-    audioQueue.async { [weak self] in
+    transmitQueue.async { [weak self] in
       self?.writeToOutputStream(audioData, stream: outputStream)
     }
   }
@@ -769,7 +777,7 @@ private final class NearbyAudioController {
         if !stream.hasSpaceAvailable {
           stalledWrites += 1
           guard stalledWrites <= maxStalledOutputWrites else {
-            return false
+            return true
           }
           Thread.sleep(forTimeInterval: stalledOutputRetryInterval)
           continue
@@ -782,7 +790,7 @@ private final class NearbyAudioController {
         if bytesWritten == 0 {
           stalledWrites += 1
           guard stalledWrites <= maxStalledOutputWrites else {
-            return false
+            return true
           }
           Thread.sleep(forTimeInterval: stalledOutputRetryInterval)
           continue
@@ -824,15 +832,28 @@ private final class NearbyAudioController {
       }
     }
 
-    audioQueue.async { [weak self] in
+    playbackQueue.async { [weak self] in
       guard let self else {
         return
       }
 
+      if self.queuedPlaybackFrames >= self.maximumQueuedPlaybackFrames {
+        self.playerNode.stop()
+        self.queuedPlaybackFrames = 0
+      }
       if !self.playerNode.isPlaying {
         self.playerNode.play()
       }
-      self.playerNode.scheduleBuffer(playbackBuffer, completionHandler: nil)
+      let scheduledFrames = AVAudioFramePosition(playbackBuffer.frameLength)
+      self.queuedPlaybackFrames += scheduledFrames
+      self.playerNode.scheduleBuffer(playbackBuffer) { [weak self] in
+        guard let self else {
+          return
+        }
+        self.playbackQueue.async {
+          self.queuedPlaybackFrames = max(0, self.queuedPlaybackFrames - scheduledFrames)
+        }
+      }
     }
   }
 
@@ -843,13 +864,54 @@ private final class NearbyAudioController {
     outboundOutputStream = nil
   }
 
+  private func flushPlayback() {
+    playbackQueue.async { [weak self] in
+      guard let self else {
+        return
+      }
+      self.playerNode.stop()
+      self.queuedPlaybackFrames = 0
+    }
+  }
+
   private func tearDownAudioIfIdle(forceDeactivate: Bool = false) {
     guard forceDeactivate || (!isTransmitting && inboundReaders.isEmpty) else {
       return
     }
 
+    if !forceDeactivate {
+      scheduleTeardown()
+      return
+    }
+
+    performTeardown()
+  }
+
+  private func scheduleTeardown() {
+    cancelTeardown()
+    let workItem = DispatchWorkItem { [weak self] in
+      self?.performTeardown()
+    }
+    teardownWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + warmAudioHoldDuration, execute: workItem)
+  }
+
+  private func cancelTeardown() {
+    teardownWorkItem?.cancel()
+    teardownWorkItem = nil
+  }
+
+  private func performTeardown() {
+    cancelTeardown()
+    guard !isTransmitting && inboundReaders.isEmpty else {
+      return
+    }
+
     audioEngine.inputNode.removeTap(onBus: 0)
-    playerNode.stop()
+    playbackQueue.sync {
+      playerNode.stop()
+      queuedPlaybackFrames = 0
+    }
     if audioEngine.isRunning {
       audioEngine.stop()
     }
@@ -866,7 +928,7 @@ private final class NearbyAudioController {
   private func makeBoundStreams() throws -> (input: InputStream, output: OutputStream) {
     var readStream: Unmanaged<CFReadStream>?
     var writeStream: Unmanaged<CFWriteStream>?
-    CFStreamCreateBoundPair(nil, &readStream, &writeStream, 65_536)
+    CFStreamCreateBoundPair(nil, &readStream, &writeStream, 8_192)
 
     guard
       let inputStream = readStream?.takeRetainedValue(),
@@ -877,6 +939,12 @@ private final class NearbyAudioController {
 
     return (inputStream as InputStream, outputStream as OutputStream)
   }
+
+  private var maximumQueuedPlaybackFrames: AVAudioFramePosition {
+    AVAudioFramePosition(playbackFormat.sampleRate * 0.04)
+  }
+
+  private let warmAudioHoldDuration: TimeInterval = 1.5
 }
 
 private final class IncomingAudioStreamReader {
@@ -914,7 +982,7 @@ private final class IncomingAudioStreamReader {
 
   private func readLoop() {
     stream.open()
-    let bufferSize = 2_048
+    let bufferSize = 640
     let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
 
     defer {

@@ -41,7 +41,7 @@ import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
+import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -339,6 +339,7 @@ class NearbyConnectionsBridge(
             when (resolution.status.statusCode) {
                 CommonStatusCodes.SUCCESS -> {
                     activeEndpoints.add(endpointId)
+                    endpointRoomMatches[endpointId] = true
                     stopDiscovery()
                     sendHandshake(endpointId)
                     emit("connected", "Connected to nearby peer over Nearby Connections.")
@@ -688,6 +689,10 @@ class NearbyConnectionsBridge(
     ) {
         private val isRunning = AtomicBoolean(false)
         private val inputStream = payload.asStream()?.asInputStream()
+        private val readExecutor = Executors.newSingleThreadExecutor()
+        private val playbackExecutor = Executors.newSingleThreadExecutor()
+        private val frameLock = Object()
+        private var latestFrame: ByteArray? = null
 
         fun start(executor: java.util.concurrent.Executor) {
             if (inputStream == null || !isRunning.compareAndSet(false, true)) {
@@ -721,28 +726,60 @@ class NearbyConnectionsBridge(
                             .build(),
                     )
                     .setTransferMode(AudioTrack.MODE_STREAM)
-                    .setBufferSizeInBytes(minBufferSize.coerceAtLeast(SAMPLE_BUFFER_BYTES))
+                    .setBufferSizeInBytes(minBufferSize.coerceAtLeast(PLAYBACK_BUFFER_BYTES))
+                    .applyLowLatencyPerformanceMode()
                     .build()
 
-                val bufferedInput = BufferedInputStream(inputStream)
-                val buffer = ByteArray(SAMPLE_BUFFER_BYTES)
+                val buffer = ByteArray(STREAM_CHUNK_BYTES)
 
                 try {
                     audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                     audioManager.isSpeakerphoneOn = true
                     audioTrack.play()
-                    while (isRunning.get()) {
-                        val count = bufferedInput.read(buffer)
-                        if (count <= 0) {
-                            break
+                    readExecutor.execute {
+                        try {
+                            while (isRunning.get()) {
+                                val count = inputStream.read(buffer)
+                                if (count <= 0) {
+                                    break
+                                }
+                                synchronized(frameLock) {
+                                    latestFrame = buffer.copyOf(count)
+                                    frameLock.notifyAll()
+                                }
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            stop()
                         }
-                        audioTrack.write(buffer, 0, count)
+                    }
+
+                    playbackExecutor.execute {
+                        try {
+                            while (isRunning.get()) {
+                                val frame = synchronized(frameLock) {
+                                    while (isRunning.get() && latestFrame == null) {
+                                        frameLock.wait(FRAME_WAIT_MILLIS)
+                                    }
+                                    latestFrame.also {
+                                        latestFrame = null
+                                    }
+                                } ?: continue
+
+                                audioTrack.write(frame, 0, frame.size, AudioTrack.WRITE_BLOCKING)
+                            }
+                        } catch (_: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                        } catch (_: Exception) {
+                        }
+                    }
+
+                    while (isRunning.get()) {
+                        Thread.sleep(FRAME_WAIT_MILLIS)
                     }
                 } finally {
-                    try {
-                        bufferedInput.close()
-                    } catch (_: Exception) {
-                    }
+                    readExecutor.shutdownNow()
+                    playbackExecutor.shutdownNow()
                     try {
                         audioTrack.stop()
                     } catch (_: Exception) {
@@ -751,6 +788,10 @@ class NearbyConnectionsBridge(
                     audioManager.mode = previousMode
                     audioManager.isSpeakerphoneOn = previousSpeakerphoneState
                     audioFocusController.release()
+                    synchronized(frameLock) {
+                        latestFrame = null
+                        frameLock.notifyAll()
+                    }
                     isRunning.set(false)
                     onEnded()
                 }
@@ -760,6 +801,10 @@ class NearbyConnectionsBridge(
         fun stop() {
             if (!isRunning.compareAndSet(true, false)) {
                 return
+            }
+            synchronized(frameLock) {
+                latestFrame = null
+                frameLock.notifyAll()
             }
             try {
                 inputStream?.close()
@@ -776,8 +821,10 @@ class NearbyConnectionsBridge(
         private val onEnded: () -> Unit,
     ) {
         private val isRunning = AtomicBoolean(false)
-        private val executor = Executors.newSingleThreadExecutor()
+        private val captureExecutor = Executors.newSingleThreadExecutor()
+        private val senderExecutor = Executors.newSingleThreadExecutor()
         private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        private val frameLock = Object()
 
         private var audioRecord: AudioRecord? = null
         private var payload: Payload? = null
@@ -787,6 +834,7 @@ class NearbyConnectionsBridge(
         private var noiseSuppressor: NoiseSuppressor? = null
         private var acousticEchoCanceler: AcousticEchoCanceler? = null
         private var automaticGainControl: AutomaticGainControl? = null
+        private var latestFrame: ByteArray? = null
 
         fun start() {
             if (!isRunning.compareAndSet(false, true)) {
@@ -807,13 +855,18 @@ class NearbyConnectionsBridge(
                 AudioFormat.ENCODING_PCM_16BIT,
             )
 
-            val record = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                minBufferSize.coerceAtLeast(SAMPLE_BUFFER_BYTES),
-            )
+            val record = AudioRecord.Builder()
+                .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(SAMPLE_RATE)
+                        .setChannelMask(AudioFormat.CHANNEL_IN_MONO)
+                        .build(),
+                )
+                .setBufferSizeInBytes(minBufferSize.coerceAtLeast(CAPTURE_BUFFER_BYTES))
+                .applyLowLatencyPerformanceMode()
+                .build()
             audioRecord = record
             attachVoiceEffects(record.audioSessionId)
 
@@ -823,24 +876,26 @@ class NearbyConnectionsBridge(
             payload = Payload.fromStream(input)
             connectionsClient.sendPayload(endpointId, payload!!)
 
-            executor.execute {
-                val bufferedOutput = BufferedOutputStream(output)
-                val buffer = ByteArray(SAMPLE_BUFFER_BYTES)
+            senderExecutor.execute {
+                streamLatestFrames(output)
+            }
+
+            captureExecutor.execute {
+                val buffer = ByteArray(STREAM_CHUNK_BYTES)
 
                 try {
                     record.startRecording()
                     while (isRunning.get()) {
-                        val readCount = record.read(buffer, 0, buffer.size)
+                        val readCount = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
                         if (readCount > 0) {
-                            bufferedOutput.write(buffer, 0, readCount)
-                            bufferedOutput.flush()
+                            val frame = buffer.copyOf(readCount)
+                            synchronized(frameLock) {
+                                latestFrame = frame
+                                frameLock.notifyAll()
+                            }
                         }
                     }
                 } finally {
-                    try {
-                        bufferedOutput.close()
-                    } catch (_: Exception) {
-                    }
                     stop()
                 }
             }
@@ -871,8 +926,39 @@ class NearbyConnectionsBridge(
             previousSpeakerphoneState = null
             previousMicrophoneMuteState = null
             audioFocusController.release()
-            executor.shutdownNow()
+            synchronized(frameLock) {
+                latestFrame = null
+                frameLock.notifyAll()
+            }
+            captureExecutor.shutdownNow()
+            senderExecutor.shutdownNow()
             onEnded()
+        }
+
+        private fun streamLatestFrames(output: OutputStream) {
+            try {
+                while (isRunning.get()) {
+                    val nextFrame = synchronized(frameLock) {
+                        while (isRunning.get() && latestFrame == null) {
+                            frameLock.wait(FRAME_WAIT_MILLIS)
+                        }
+                        latestFrame.also {
+                            latestFrame = null
+                        }
+                    } ?: continue
+
+                    output.write(nextFrame)
+                    output.flush()
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } catch (_: Exception) {
+            } finally {
+                try {
+                    output.close()
+                } catch (_: Exception) {
+                }
+            }
         }
 
         private fun attachVoiceEffects(audioSessionId: Int) {
@@ -958,12 +1044,32 @@ class NearbyConnectionsBridge(
         }
     }
 
+    private fun AudioTrack.Builder.applyLowLatencyPerformanceMode(): AudioTrack.Builder {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+        }
+        return this
+    }
+
+    private fun AudioRecord.Builder.applyLowLatencyPerformanceMode(): AudioRecord.Builder {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            setPerformanceMode(AudioRecord.PERFORMANCE_MODE_LOW_LATENCY)
+        }
+        return this
+    }
+
     companion object {
         private const val REQUEST_PERMISSIONS_CODE = 3_101
         private const val SAMPLE_RATE = 16_000
-        private const val SAMPLE_BUFFER_BYTES = 2_048
+        private const val PCM_BYTES_PER_SAMPLE = 2
+        private const val STREAM_CHUNK_MILLIS = 20
+        private const val STREAM_CHUNK_BYTES =
+            SAMPLE_RATE * PCM_BYTES_PER_SAMPLE * STREAM_CHUNK_MILLIS / 1_000
+        private const val CAPTURE_BUFFER_BYTES = STREAM_CHUNK_BYTES * 4
+        private const val PLAYBACK_BUFFER_BYTES = STREAM_CHUNK_BYTES * 4
+        private const val FRAME_WAIT_MILLIS = 10L
         private const val DISCOVERY_WINDOW_MILLIS = 15_000L
-        private const val CONNECTION_REQUEST_DELAY_MILLIS = 1_200L
+        private const val CONNECTION_REQUEST_DELAY_MILLIS = 250L
         private const val CONNECTION_RETRY_DELAY_MILLIS = 2_000L
     }
 }
