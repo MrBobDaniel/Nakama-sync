@@ -838,7 +838,7 @@ class NearbyConnectionsBridge(
 
         fun drainFrame(): ByteArray? {
             synchronized(lock) {
-                if (queuedBytes == 0) {
+                if (queuedBytes < frameBytes) {
                     return null
                 }
 
@@ -1252,10 +1252,9 @@ class NearbyConnectionsBridge(
         private fun totalUsers(): Int = playbackUsers + captureUsers
 
         private fun requestFocusLocked() {
+            val focusGain = AudioManager.AUDIOFOCUS_GAIN
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val request = AudioFocusRequest.Builder(
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
-                )
+                val request = AudioFocusRequest.Builder(focusGain)
                     .setOnAudioFocusChangeListener(focusChangeListener)
                     .setAcceptsDelayedFocusGain(false)
                     .setAudioAttributes(
@@ -1272,7 +1271,7 @@ class NearbyConnectionsBridge(
                 audioManager.requestAudioFocus(
                     focusChangeListener,
                     AudioManager.STREAM_MUSIC,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+                    focusGain,
                 )
             }
         }
@@ -1329,8 +1328,7 @@ private fun buildAudioTrack(
         AudioFormat.CHANNEL_OUT_MONO,
         AudioFormat.ENCODING_PCM_16BIT,
     )
-    val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    val audioTrack = AudioTrack.Builder()
+    return AudioTrack.Builder()
         .setAudioAttributes(
             AudioAttributes.Builder()
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
@@ -1347,25 +1345,4 @@ private fun buildAudioTrack(
         .setTransferMode(AudioTrack.MODE_STREAM)
         .setBufferSizeInBytes(max(minBufferSize, frameBytes * 2))
         .build()
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && supportsLowLatencyAudio(context)) {
-        preferredOutputFramesPerBuffer(audioManager)?.let { preferredFrames ->
-            if (preferredFrames > 0) {
-                audioTrack.setBufferSizeInFrames(preferredFrames)
-            }
-        }
-    }
-    return audioTrack
-}
-
-private fun preferredOutputFramesPerBuffer(audioManager: AudioManager): Int? {
-    return audioManager
-        .getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)
-        ?.toIntOrNull()
-        ?.takeIf { it > 0 }
-}
-
-private fun supportsLowLatencyAudio(context: Context): Boolean {
-    val packageManager = context.packageManager
-    return packageManager.hasSystemFeature(PackageManager.FEATURE_AUDIO_LOW_LATENCY) ||
-        packageManager.hasSystemFeature(PackageManager.FEATURE_AUDIO_PRO)
 }

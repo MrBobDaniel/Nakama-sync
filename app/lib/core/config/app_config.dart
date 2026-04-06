@@ -3,7 +3,6 @@ class AppConfig {
     required this.navidromeBaseUrl,
     required this.navidromeUsername,
     required this.navidromePassword,
-    required this.signalingServerUrl,
   });
 
   factory AppConfig.fromEnvironment() {
@@ -20,17 +19,12 @@ class AppConfig {
         'NAKAMA_NAVIDROME_PASSWORD',
         defaultValue: '',
       ),
-      signalingServerUrl: String.fromEnvironment(
-        'NAKAMA_SIGNALING_URL',
-        defaultValue: 'http://localhost:3000',
-      ),
     );
   }
 
   final String navidromeBaseUrl;
   final String navidromeUsername;
   final String navidromePassword;
-  final String signalingServerUrl;
 
   bool get hasMusicConfig =>
       navidromeBaseUrl.isNotEmpty &&
