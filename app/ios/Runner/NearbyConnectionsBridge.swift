@@ -522,6 +522,8 @@ private final class NearbyAudioController {
     channels: 1,
     interleaved: false
   )!
+  private let maxStalledOutputWrites = 32
+  private let stalledOutputRetryInterval = 0.002
 
   private var captureConverter: AVAudioConverter?
   private var outboundEndpoint: EndpointID?
@@ -739,11 +741,31 @@ private final class NearbyAudioController {
       }
 
       var totalWritten = 0
+      var stalledWrites = 0
       while totalWritten < data.count {
+        if !stream.hasSpaceAvailable {
+          stalledWrites += 1
+          guard stalledWrites <= maxStalledOutputWrites else {
+            return false
+          }
+          Thread.sleep(forTimeInterval: stalledOutputRetryInterval)
+          continue
+        }
+
         let bytesWritten = stream.write(baseAddress.advanced(by: totalWritten), maxLength: data.count - totalWritten)
-        if bytesWritten <= 0 {
+        if bytesWritten < 0 {
           return false
         }
+        if bytesWritten == 0 {
+          stalledWrites += 1
+          guard stalledWrites <= maxStalledOutputWrites else {
+            return false
+          }
+          Thread.sleep(forTimeInterval: stalledOutputRetryInterval)
+          continue
+        }
+
+        stalledWrites = 0
         totalWritten += bytesWritten
       }
       return true
@@ -821,7 +843,7 @@ private final class NearbyAudioController {
   private func makeBoundStreams() throws -> (input: InputStream, output: OutputStream) {
     var readStream: Unmanaged<CFReadStream>?
     var writeStream: Unmanaged<CFWriteStream>?
-    CFStreamCreateBoundPair(nil, &readStream, &writeStream, 8_192)
+    CFStreamCreateBoundPair(nil, &readStream, &writeStream, 65_536)
 
     guard
       let inputStream = readStream?.takeRetainedValue(),
