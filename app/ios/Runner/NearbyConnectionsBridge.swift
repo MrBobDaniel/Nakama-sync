@@ -775,6 +775,7 @@ private final class NearbyAudioController {
   private let deactivateAudioSession: () -> Void
   private let onError: (String) -> Void
   private let onPeerSpeakingChanged: (EndpointID, Bool) -> Void
+  private let stateLock = NSLock()
   private let transmitQueueKey = DispatchSpecificKey<Void>()
   private let audioEngine = AVAudioEngine()
   private let playerNode = AVAudioPlayerNode()
@@ -796,7 +797,7 @@ private final class NearbyAudioController {
   private var mixerTimer: DispatchSourceTimer?
 
   var isTransmitting: Bool {
-    !outboundStreams.isEmpty
+    withStateLock { !outboundStreams.isEmpty }
   }
 
   private var captureFormat: AVAudioFormat {
@@ -843,10 +844,15 @@ private final class NearbyAudioController {
       return
     }
 
-    outboundStreams.keys
-      .filter { !endpoints.contains($0) }
-      .forEach(removeOutboundStream)
-    for endpointID in endpoints where outboundStreams[endpointID] == nil {
+    let endpointsToRemove = withStateLock {
+      outboundStreams.keys.filter { !endpoints.contains($0) }
+    }
+    endpointsToRemove.forEach(removeOutboundStream)
+
+    let endpointsToAdd = withStateLock {
+      endpoints.filter { outboundStreams[$0] == nil }
+    }
+    for endpointID in endpointsToAdd {
       try addOutboundStream(endpointID, connectionManager: connectionManager)
     }
 
@@ -855,9 +861,13 @@ private final class NearbyAudioController {
 
   func stopTransmitting() {
     audioEngine.inputNode.removeTap(onBus: 0)
-    outboundStreams.values.forEach { $0.close() }
-    outboundStreams.removeAll()
-    captureConverter = nil
+    let streamsToClose = withStateLock {
+      let streams = Array(outboundStreams.values)
+      outboundStreams.removeAll()
+      captureConverter = nil
+      return streams
+    }
+    streamsToClose.forEach { $0.close() }
     clearPendingCaptureData()
     tearDownAudioIfIdle()
   }
@@ -870,21 +880,29 @@ private final class NearbyAudioController {
       cancelTeardown()
       try prepareAudioGraph()
       try configureAudioEngineIfNeeded()
-      inboundReaders[endpointID]?.stop()
-      inboundBuffers[endpointID] = PeerAudioBuffer(frameByteCount: frameByteCount)
+
+      let previousReader = withStateLock { inboundReaders[endpointID] }
+      previousReader?.stop()
+
+      let buffer = PeerAudioBuffer(frameByteCount: frameByteCount)
       let reader = IncomingAudioStreamReader(
         stream: stream,
         bufferSize: frameByteCount,
         queue: receiveQueue,
         onAudioData: { [weak self] data in
-          self?.inboundBuffers[endpointID]?.append(data)
+          self?.withStateLock {
+            self?.inboundBuffers[endpointID]?.append(data)
+          }
           self?.onPeerSpeakingChanged(endpointID, true)
         },
         onFinished: { [weak self] in
           self?.stopIncomingAudio(from: endpointID)
         }
       )
-      inboundReaders[endpointID] = reader
+      withStateLock {
+        inboundBuffers[endpointID] = buffer
+        inboundReaders[endpointID] = reader
+      }
       try ensurePlaybackRunning()
       ensureMixerTimer()
       reader.start()
@@ -894,8 +912,12 @@ private final class NearbyAudioController {
   }
 
   func stopIncomingAudio(from endpointID: EndpointID) {
-    inboundReaders.removeValue(forKey: endpointID)?.stop()
-    inboundBuffers.removeValue(forKey: endpointID)
+    let readerToStop = withStateLock {
+      let reader = inboundReaders.removeValue(forKey: endpointID)
+      inboundBuffers.removeValue(forKey: endpointID)
+      return reader
+    }
+    readerToStop?.stop()
     onPeerSpeakingChanged(endpointID, false)
     tearDownAudioIfIdle()
   }
@@ -907,12 +929,17 @@ private final class NearbyAudioController {
 
   func stopAll() {
     stopTransmitting()
-    inboundReaders.values.forEach { $0.stop() }
-    inboundReaders.removeAll()
-    inboundBuffers.removeAll()
-    mixerTimer?.cancel()
-    mixerTimer = nil
-    queuedPlaybackFrames = 0
+    let state = withStateLock {
+      let readers = Array(inboundReaders.values)
+      inboundReaders.removeAll()
+      inboundBuffers.removeAll()
+      let timer = mixerTimer
+      mixerTimer = nil
+      queuedPlaybackFrames = 0
+      return (readers, timer)
+    }
+    state.0.forEach { $0.stop() }
+    state.1?.cancel()
     tearDownAudioIfIdle(forceDeactivate: true)
   }
 
@@ -923,30 +950,45 @@ private final class NearbyAudioController {
     let streams = try makeBoundStreams()
     streams.input.open()
     streams.output.open()
-    outboundStreams[endpointID] = BoundOutputStream(
-      input: streams.input,
-      output: streams.output
-    )
+    withStateLock {
+      outboundStreams[endpointID] = BoundOutputStream(
+        input: streams.input,
+        output: streams.output
+      )
+    }
     connectionManager.startStream(streams.input, to: [endpointID])
   }
 
   private func removeOutboundStream(_ endpointID: EndpointID) {
-    outboundStreams.removeValue(forKey: endpointID)?.close()
-    if outboundStreams.isEmpty {
+    let result = withStateLock {
+      let stream = outboundStreams.removeValue(forKey: endpointID)
+      let isEmpty = outboundStreams.isEmpty
+      if isEmpty {
+        captureConverter = nil
+      }
+      return (stream, isEmpty)
+    }
+    result.0?.close()
+    if result.1 {
       audioEngine.inputNode.removeTap(onBus: 0)
-      captureConverter = nil
       clearPendingCaptureData()
     }
   }
 
   private func configureAudioEngineIfNeeded() throws {
-    guard !isConfigured else {
+    let shouldConfigure = withStateLock {
+      if isConfigured {
+        return false
+      }
+      isConfigured = true
+      return true
+    }
+    guard shouldConfigure else {
       return
     }
 
     audioEngine.attach(playerNode)
     audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
-    isConfigured = true
   }
 
   private func prepareAudioGraph() throws {
@@ -956,11 +998,14 @@ private final class NearbyAudioController {
   private func ensureCaptureTapRunning() throws {
     let inputNode = audioEngine.inputNode
     let inputFormat = inputNode.outputFormat(forBus: 0)
-    if captureConverter == nil {
+    let needsConverter = withStateLock { captureConverter == nil }
+    if needsConverter {
       guard let converter = AVAudioConverter(from: inputFormat, to: captureFormat) else {
         throw NearbyAudioError.converterCreationFailed
       }
-      captureConverter = converter
+      withStateLock {
+        captureConverter = converter
+      }
       inputNode.removeTap(onBus: 0)
       inputNode.installTap(
         onBus: 0,
@@ -988,7 +1033,8 @@ private final class NearbyAudioController {
   }
 
   private func ensureMixerTimer() {
-    guard mixerTimer == nil else {
+    let shouldCreateTimer = withStateLock { mixerTimer == nil }
+    guard shouldCreateTimer else {
       return
     }
 
@@ -997,12 +1043,15 @@ private final class NearbyAudioController {
     timer.setEventHandler { [weak self] in
       self?.mixAndSchedulePlayback()
     }
-    mixerTimer = timer
+    withStateLock {
+      mixerTimer = timer
+    }
     timer.resume()
   }
 
   private func writeCapturedAudio(_ buffer: AVAudioPCMBuffer) {
-    guard !outboundStreams.isEmpty, let converter = captureConverter else {
+    let converter = withStateLock { captureConverter }
+    guard isTransmitting, let converter else {
       return
     }
 
@@ -1055,25 +1104,30 @@ private final class NearbyAudioController {
       return
     }
 
-    pendingCaptureData.append(data)
-    while pendingCaptureData.count >= frameByteCount {
-      let frame = pendingCaptureData.prefix(frameByteCount)
-      broadcast(Data(frame))
-      pendingCaptureData.removeFirst(frameByteCount)
+    let frames = withStateLock { () -> [Data] in
+      pendingCaptureData.append(data)
+      var frames = [Data]()
+      while pendingCaptureData.count >= frameByteCount {
+        let frame = pendingCaptureData.prefix(frameByteCount)
+        frames.append(Data(frame))
+        pendingCaptureData.removeFirst(frameByteCount)
+      }
+      return frames
     }
+    frames.forEach(broadcast)
   }
 
   private func clearPendingCaptureData() {
-    let clear = { self.pendingCaptureData.removeAll(keepingCapacity: false) }
-    if DispatchQueue.getSpecific(key: transmitQueueKey) != nil {
-      clear()
-    } else {
-      transmitQueue.sync(execute: clear)
+    withStateLock {
+      pendingCaptureData.removeAll(keepingCapacity: false)
     }
   }
 
   private func broadcast(_ data: Data) {
-    for (endpointID, boundStream) in outboundStreams {
+    let streams = withStateLock {
+      Array(outboundStreams.map { ($0.key, $0.value) })
+    }
+    for (endpointID, boundStream) in streams {
       let succeeded = writeToOutputStream(data, stream: boundStream.output)
       if !succeeded {
         removeOutboundStream(endpointID)
@@ -1103,7 +1157,15 @@ private final class NearbyAudioController {
   }
 
   private func mixAndSchedulePlayback() {
-    let frames = inboundBuffers.compactMapValues { $0.drainFrame(frameByteCount: frameByteCount) }
+    let buffers = withStateLock { Array(inboundBuffers) }
+    let frames = Dictionary(
+      uniqueKeysWithValues: buffers.compactMap { endpointID, buffer in
+        guard let frame = buffer.drainFrame(frameByteCount: frameByteCount) else {
+          return nil
+        }
+        return (endpointID, frame)
+      }
+    )
     guard !frames.isEmpty else {
       return
     }
@@ -1135,17 +1197,22 @@ private final class NearbyAudioController {
     }
 
     let scheduledFrames = AVAudioFramePosition(playbackBuffer.frameLength)
-    queuedPlaybackFrames += scheduledFrames
+    withStateLock {
+      queuedPlaybackFrames += scheduledFrames
+    }
     playerNode.scheduleBuffer(playbackBuffer) { [weak self] in
       self?.playbackQueue.async {
         guard let self else { return }
-        self.queuedPlaybackFrames = max(0, self.queuedPlaybackFrames - scheduledFrames)
+        self.withStateLock {
+          self.queuedPlaybackFrames = max(0, self.queuedPlaybackFrames - scheduledFrames)
+        }
       }
     }
   }
 
   private func tearDownAudioIfIdle(forceDeactivate: Bool = false) {
-    guard forceDeactivate || (outboundStreams.isEmpty && inboundReaders.isEmpty) else {
+    let isIdle = withStateLock { outboundStreams.isEmpty && inboundReaders.isEmpty }
+    guard forceDeactivate || isIdle else {
       return
     }
 
@@ -1162,34 +1229,53 @@ private final class NearbyAudioController {
     let workItem = DispatchWorkItem { [weak self] in
       self?.performTeardown()
     }
-    teardownWorkItem = workItem
+    withStateLock {
+      teardownWorkItem = workItem
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: workItem)
   }
 
   private func cancelTeardown() {
-    teardownWorkItem?.cancel()
-    teardownWorkItem = nil
+    let workItem = withStateLock {
+      let existing = teardownWorkItem
+      teardownWorkItem = nil
+      return existing
+    }
+    workItem?.cancel()
   }
 
   private func performTeardown() {
     cancelTeardown()
-    guard outboundStreams.isEmpty && inboundReaders.isEmpty else {
+    let isIdle = withStateLock { outboundStreams.isEmpty && inboundReaders.isEmpty }
+    guard isIdle else {
       return
     }
 
     audioEngine.inputNode.removeTap(onBus: 0)
     playbackQueue.sync {
       playerNode.stop()
-      queuedPlaybackFrames = 0
+      self.withStateLock {
+        self.queuedPlaybackFrames = 0
+      }
     }
     if audioEngine.isRunning {
       audioEngine.stop()
     }
-    mixerTimer?.cancel()
-    mixerTimer = nil
-    captureConverter = nil
+    let timer = withStateLock {
+      let timer = mixerTimer
+      mixerTimer = nil
+      captureConverter = nil
+      return timer
+    }
+    timer?.cancel()
     clearPendingCaptureData()
     deactivateAudioSession()
+  }
+
+  private func withStateLock<T>(_ body: () -> T) -> T {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return body()
   }
 
   private func makeBoundStreams() throws -> (input: InputStream, output: OutputStream) {
