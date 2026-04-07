@@ -389,10 +389,11 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   }
 
   private func emit(event: String, message: String, extra: [String: Any] = [:]) {
+    let currentRoomID = normalizedRoomID()
     var payload: [String: Any] = [
       "event": event,
       "message": message,
-      "roomId": roomID as Any,
+      "roomId": currentRoomID ?? NSNull(),
       "connectedPeers": connectedEndpoints.filter { endpointRoomMatches[$0] == true }.count,
       "isDiscovering": isDiscovering,
       "isReceivingAudio": peerSessions.values.contains { $0.isConnected && $0.isSpeaking },
@@ -675,10 +676,15 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
 }
 
 private extension NearbyConnectionsBridge {
+  func normalizedRoomID() -> String? {
+    let trimmed = roomID?.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed?.isEmpty == false ? trimmed : nil
+  }
+
   func endpointContextData() -> Data {
     let localAudioConfig = buildLocalAudioConfig()
     let payload: [String: Any] = [
-      "roomId": roomID as Any,
+      "roomId": normalizedRoomID() ?? NSNull(),
       "displayName": displayName,
       "preferredSampleRate": localAudioConfig.preferredSampleRate,
       "supportedSampleRates": localAudioConfig.supportedSampleRates,
@@ -695,7 +701,7 @@ private extension NearbyConnectionsBridge {
     let localAudioConfig = buildLocalAudioConfig()
     let payload: [String: Any] = [
       "type": type,
-      "roomId": roomID as Any,
+      "roomId": normalizedRoomID() ?? NSNull(),
       "displayName": displayName,
       "preferredSampleRate": localAudioConfig.preferredSampleRate,
       "supportedSampleRates": localAudioConfig.supportedSampleRates,
@@ -766,9 +772,11 @@ private extension NearbyConnectionsBridge {
   }
 
   func roomMatches(_ peerRoomID: String?) -> Bool {
-    let normalizedRoomID = roomID?.trimmingCharacters(in: .whitespacesAndNewlines)
     let normalizedPeerRoomID = peerRoomID?.trimmingCharacters(in: .whitespacesAndNewlines)
-    return normalizedRoomID == nil || normalizedRoomID?.isEmpty == true || normalizedPeerRoomID == normalizedRoomID
+    guard let normalizedRoomID = normalizedRoomID() else {
+      return true
+    }
+    return normalizedPeerRoomID == normalizedRoomID
   }
 
   func parseEndpointContext(_ context: Data) -> NearbyEndpointContext {
