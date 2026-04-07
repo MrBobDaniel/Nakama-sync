@@ -21,6 +21,7 @@ final class IOSCommsSessionManager: NSObject {
   private var isStoppingLocally = false
   private var isCallKitActivated = false
   private var isAudioSessionConfigured = false
+  private var isVoiceAudioPrepared = false
   private var isReceivingAudio = false
   private var isTransmitting = false
 
@@ -59,15 +60,10 @@ final class IOSCommsSessionManager: NSObject {
     self.displayName = displayName
     isStoppingLocally = false
 
-    do {
-      try configureAudioSession(activate: false)
-    } catch {
-      return StartResult(
-        isCallKitActive: false,
-        isAudioSessionConfigured: false,
-        message: "CallKit audio session setup failed: \(error.localizedDescription)"
-      )
-    }
+    isVoiceAudioPrepared = false
+    isReceivingAudio = false
+    isTransmitting = false
+    deactivateAudioSession()
 
     let callUUID = UUID()
     activeCallUUID = callUUID
@@ -91,7 +87,7 @@ final class IOSCommsSessionManager: NSObject {
 
       self.provider.reportOutgoingCall(with: callUUID, startedConnectingAt: Date())
       self.emitState(
-        message: "iOS CallKit walkie-talkie session is active."
+        message: "iOS CallKit Link session is active."
       )
     }
 
@@ -125,11 +121,13 @@ final class IOSCommsSessionManager: NSObject {
   }
 
   func prepareForVoiceAudio() throws {
-    try configureAudioSession(activate: true)
+    isVoiceAudioPrepared = true
+    try applyAudioSessionConfiguration()
   }
 
   func deactivateVoiceAudio() {
-    deactivateAudioSession()
+    isVoiceAudioPrepared = false
+    try? applyAudioSessionConfiguration()
   }
 
   func updateAudioState(isReceivingAudio: Bool, isTransmitting: Bool) {
@@ -137,7 +135,7 @@ final class IOSCommsSessionManager: NSObject {
     self.isTransmitting = isTransmitting
 
     do {
-      try configureAudioSession(activate: isReceivingAudio || isTransmitting || activeCallUUID != nil)
+      try applyAudioSessionConfiguration()
       emitState(message: audioStatusMessage())
     } catch {
       emitState(
@@ -162,22 +160,33 @@ final class IOSCommsSessionManager: NSObject {
     )
   }
 
-  private func configureAudioSession(activate: Bool) throws {
+  private func applyAudioSessionConfiguration() throws {
+    let shouldKeepSessionActive = isVoiceAudioPrepared || isReceivingAudio || isTransmitting
+    guard shouldKeepSessionActive else {
+      deactivateAudioSession()
+      return
+    }
+
+    let hasActiveVoiceAudio = isReceivingAudio || isTransmitting
+    var options: AVAudioSession.CategoryOptions = [
+      .allowBluetooth,
+      .mixWithOthers,
+    ]
+    if hasActiveVoiceAudio {
+      options.insert(.duckOthers)
+    } else {
+      options.insert(.allowBluetoothA2DP)
+    }
+
     try session.setCategory(
       .playAndRecord,
-      mode: .voiceChat,
-      options: [
-        .defaultToSpeaker,
-        .allowBluetooth,
-        .duckOthers,
-      ]
+      mode: hasActiveVoiceAudio ? .voiceChat : .default,
+      options: options
     )
     try session.setPreferredSampleRate(16_000)
     try session.setPreferredIOBufferDuration(0.01)
-    if activate {
-      try session.setActive(true)
-      try? session.overrideOutputAudioPort(.speaker)
-    }
+    try session.setActive(true)
+    isCallKitActivated = true
     isAudioSessionConfigured = true
   }
 
@@ -203,7 +212,7 @@ final class IOSCommsSessionManager: NSObject {
     if isReceivingAudio {
       return "iOS CallKit session is receiving voice audio."
     }
-    return "iOS CallKit session is standing by for walkie-talkie audio."
+    return "iOS CallKit session is standing by for Link audio."
   }
 
   private func emitState(message: String) {
@@ -232,7 +241,7 @@ final class IOSCommsSessionManager: NSObject {
       emitState(message: "iOS audio session was interrupted.")
     case .ended:
       do {
-        try configureAudioSession(activate: activeCallUUID != nil)
+        try applyAudioSessionConfiguration()
         emitState(message: audioStatusMessage())
       } catch {
         emitState(message: "iOS audio session failed to recover after interruption.")
@@ -247,7 +256,7 @@ final class IOSCommsSessionManager: NSObject {
     guard activeCallUUID != nil else { return }
 
     do {
-      try configureAudioSession(activate: true)
+      try applyAudioSessionConfiguration()
       emitState(message: "iOS audio session was restored after a media services reset.")
     } catch {
       emitState(message: "iOS audio session failed after a media services reset.")
@@ -266,17 +275,9 @@ extension IOSCommsSessionManager: CXProviderDelegate {
   }
 
   func provider(_ provider: CXProvider, perform action: CXStartCallAction) {
-    do {
-      try configureAudioSession(activate: true)
-      provider.reportOutgoingCall(with: action.callUUID, connectedAt: Date())
-      action.fulfill()
-      emitState(message: "iOS CallKit walkie-talkie session is active.")
-    } catch {
-      action.fail()
-      activeCallUUID = nil
-      emitState(message: "CallKit failed to activate the audio session.")
-      onSystemSessionEnded("CallKit failed to activate the audio session.")
-    }
+    provider.reportOutgoingCall(with: action.callUUID, connectedAt: Date())
+    action.fulfill()
+    emitState(message: "iOS CallKit Link session is active.")
   }
 
   func provider(_ provider: CXProvider, perform action: CXEndCallAction) {

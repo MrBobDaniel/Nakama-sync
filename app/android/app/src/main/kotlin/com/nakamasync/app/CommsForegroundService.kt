@@ -85,10 +85,10 @@ class CommsForegroundService : Service() {
         val notificationManager = getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Nakama Sync Comms",
+            "Nakama Sync Link",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Keeps walkie-talkie comms active while the device is locked."
+            description = "Keeps Link active while the device is locked."
             setShowBadge(false)
         }
         notificationManager.createNotificationChannel(channel)

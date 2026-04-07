@@ -141,7 +141,7 @@ class MusicConfigurationRequiredScreen extends StatelessWidget {
           IconButton(
             onPressed: () => context.go('/comms'),
             icon: const Icon(Icons.wifi_tethering),
-            tooltip: 'Walkie-Talkie',
+            tooltip: 'Link',
           ),
         ],
       ),

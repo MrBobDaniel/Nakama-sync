@@ -8,11 +8,11 @@
 		<string>voip</string>
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Nakama Sync requires microphone access for the zero-latency walkie-talkie mode.</string>
+	<string>Nakama Sync requires microphone access for Link.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Nakama Sync uses Bluetooth to discover and negotiate nearby walkie-talkie peers.</string>
+	<string>Nakama Sync uses Bluetooth to discover and connect nearby Link peers.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Nakama Sync uses the local network to discover and communicate with nearby walkie-talkie peers.</string>
+	<string>Nakama Sync uses the local network to discover and communicate with nearby Link peers.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_5a731ab9f7b8._tcp</string>

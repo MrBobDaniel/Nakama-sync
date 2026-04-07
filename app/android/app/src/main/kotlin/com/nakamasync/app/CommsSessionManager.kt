@@ -201,9 +201,9 @@ object CommsSessionManager {
 
         val telecomManager = context.getSystemService(TelecomManager::class.java) ?: return false
         val accountHandle = phoneAccountHandle(context)
-        val phoneAccount = PhoneAccount.builder(accountHandle, "Nakama Sync Walkie-Talkie")
+        val phoneAccount = PhoneAccount.builder(accountHandle, "Nakama Sync Link")
             .setCapabilities(PhoneAccount.CAPABILITY_SELF_MANAGED)
-            .setShortDescription("Keeps the Nakama Sync comms lane active while locked.")
+            .setShortDescription("Keeps Nakama Sync Link active while locked.")
             .setSupportedUriSchemes(listOf(PhoneAccount.SCHEME_TEL))
             .build()
 
@@ -211,7 +211,6 @@ object CommsSessionManager {
             telecomManager.registerPhoneAccount(phoneAccount)
             val extras = Bundle().apply {
                 putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, accountHandle)
-                putBoolean(TelecomManager.EXTRA_START_CALL_WITH_SPEAKERPHONE, true)
                 putString(CallConnectionService.EXTRA_ROOM_ID, roomId)
                 putString(CallConnectionService.EXTRA_DISPLAY_NAME, latestState.displayName)
             }

@@ -52,6 +52,18 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     onError: { [weak self] message in
       self?.emit(event: "error", message: message)
     },
+    onTransmitStateChanged: { [weak self] isTransmitting, message in
+      guard let self else { return }
+      self.syncOSAudioState()
+      self.emit(
+        event: "transmit_state",
+        message: message,
+        extra: [
+          "isTransmitting": isTransmitting,
+          "audioSampleRate": NearbyAudioConfig.defaultStreamSampleRate
+        ]
+      )
+    },
     onPeerSpeakingChanged: { [weak self] endpointID, isSpeaking in
       self?.updatePeerSpeaking(endpointID, isSpeaking: isSpeaking)
     }
@@ -246,11 +258,11 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
         }
 
         guard granted else {
-          self.emit(event: "error", message: "Microphone permission is required for push-to-talk.")
+          self.emit(event: "error", message: "Microphone permission is required for Hold to Talk.")
           result(
             FlutterError(
               code: "microphone_permission_denied",
-              message: "Microphone permission is required for push-to-talk.",
+              message: "Microphone permission is required for Hold to Talk.",
               details: nil
             )
           )
@@ -262,15 +274,6 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
           try self.audioController.syncTransmittingEndpoints(
             Set(validatedEndpoints),
             connectionManager: self.connectionManager
-          )
-          self.syncOSAudioState()
-          self.emit(
-            event: "transmit_state",
-            message: "Streaming microphone audio to \(validatedEndpoints.count) peer(s).",
-            extra: [
-              "isTransmitting": true,
-              "audioSampleRate": NearbyAudioConfig.defaultStreamSampleRate
-            ]
           )
           result(nil)
         } catch {
@@ -291,10 +294,6 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
         sendControlPayload(type: "audio_stop", to: endpointID)
       }
       audioController.stopTransmitting()
-      syncOSAudioState()
-      emit(event: "transmit_state", message: "Push-to-talk stream is idle.", extra: [
-        "isTransmitting": false
-      ])
       result(nil)
     }
     #else
@@ -909,6 +908,7 @@ private final class NearbyAudioController {
   private let prepareAudioSession: () throws -> Void
   private let deactivateAudioSession: () -> Void
   private let onError: (String) -> Void
+  private let onTransmitStateChanged: (Bool, String) -> Void
   private let onPeerSpeakingChanged: (EndpointID, Bool) -> Void
   private let stateLock = NSLock()
   private let transmitQueueKey = DispatchSpecificKey<Void>()
@@ -931,6 +931,7 @@ private final class NearbyAudioController {
   private var transmitEndpointIDs = Set<EndpointID>()
   private var inboundReaders = [EndpointID: IncomingAudioStreamReader]()
   private var inboundBuffers = [EndpointID: PeerAudioBuffer]()
+  private var inboundSpeechActivity = [EndpointID: SpeechActivityTracker]()
   private var pendingCaptureData = Data()
   private var preRollFrames = [Data]()
   private var isConfigured = false
@@ -940,6 +941,7 @@ private final class NearbyAudioController {
   private var transmissionMode = TransmissionMode.manual
   private var isVoiceActivationEnabled = false
   private var isVoiceActivationArmedState = false
+  private var lastReportedTransmitState: Bool?
 
   var isTransmitting: Bool {
     withStateLock { !outboundStreams.isEmpty }
@@ -971,11 +973,13 @@ private final class NearbyAudioController {
     prepareAudioSession: @escaping () throws -> Void,
     deactivateAudioSession: @escaping () -> Void,
     onError: @escaping (String) -> Void,
+    onTransmitStateChanged: @escaping (Bool, String) -> Void,
     onPeerSpeakingChanged: @escaping (EndpointID, Bool) -> Void
   ) {
     self.prepareAudioSession = prepareAudioSession
     self.deactivateAudioSession = deactivateAudioSession
     self.onError = onError
+    self.onTransmitStateChanged = onTransmitStateChanged
     self.onPeerSpeakingChanged = onPeerSpeakingChanged
     transmitQueue.setSpecific(key: transmitQueueKey, value: ())
   }
@@ -1045,6 +1049,10 @@ private final class NearbyAudioController {
       return streams
     }
     streamsToClose.forEach { $0.close() }
+    updateTransmitStateIfNeeded(
+      activeMessage: "Streaming microphone audio to \(transmitEndpointIDs.count) peer(s).",
+      inactiveMessage: "Transmit is idle."
+    )
     clearPendingCaptureData()
     tearDownAudioIfIdle()
   }
@@ -1069,8 +1077,10 @@ private final class NearbyAudioController {
         onAudioData: { [weak self] data in
           self?.withStateLock {
             self?.inboundBuffers[endpointID]?.append(data)
+            if let isSpeaking = self?.inboundSpeechActivity[endpointID]?.process(data) {
+              self?.onPeerSpeakingChanged(endpointID, isSpeaking)
+            }
           }
-          self?.onPeerSpeakingChanged(endpointID, true)
         },
         onFinished: { [weak self] in
           self?.stopIncomingAudio(from: endpointID)
@@ -1078,6 +1088,10 @@ private final class NearbyAudioController {
       )
       withStateLock {
         inboundBuffers[endpointID] = buffer
+        inboundSpeechActivity[endpointID] = SpeechActivityTracker(
+          frameMillis: 20,
+          sensitivity: 0.55
+        )
         inboundReaders[endpointID] = reader
       }
       try ensurePlaybackRunning()
@@ -1092,6 +1106,7 @@ private final class NearbyAudioController {
     let readerToStop = withStateLock {
       let reader = inboundReaders.removeValue(forKey: endpointID)
       inboundBuffers.removeValue(forKey: endpointID)
+      inboundSpeechActivity.removeValue(forKey: endpointID)
       return reader
     }
     readerToStop?.stop()
@@ -1110,6 +1125,7 @@ private final class NearbyAudioController {
       let readers = Array(inboundReaders.values)
       inboundReaders.removeAll()
       inboundBuffers.removeAll()
+      inboundSpeechActivity.removeAll()
       let timer = mixerTimer
       mixerTimer = nil
       queuedPlaybackFrames = 0
@@ -1133,6 +1149,10 @@ private final class NearbyAudioController {
         output: streams.output
       )
     }
+    updateTransmitStateIfNeeded(
+      activeMessage: "Streaming microphone audio to \(transmitEndpointIDs.count) peer(s).",
+      inactiveMessage: "Transmit is idle."
+    )
     connectionManager.startStream(streams.input, to: [endpointID])
   }
 
@@ -1150,6 +1170,10 @@ private final class NearbyAudioController {
       audioEngine.inputNode.removeTap(onBus: 0)
       clearPendingCaptureData()
     }
+    updateTransmitStateIfNeeded(
+      activeMessage: "Streaming microphone audio to \(transmitEndpointIDs.count) peer(s).",
+      inactiveMessage: "Transmit is idle."
+    )
   }
 
   private func configureAudioEngineIfNeeded() throws {
@@ -1364,6 +1388,25 @@ private final class NearbyAudioController {
     for endpointID in endpointsToAdd {
       try addOutboundStream(endpointID, connectionManager: connectionManager)
     }
+    updateTransmitStateIfNeeded(
+      activeMessage: "Voice activation opened transmit to \(endpoints.count) peer(s).",
+      inactiveMessage: "Transmit is idle."
+    )
+  }
+
+  private func updateTransmitStateIfNeeded(
+    activeMessage: String,
+    inactiveMessage: String
+  ) {
+    let isTransmittingNow = isTransmitting
+    if lastReportedTransmitState == isTransmittingNow {
+      return
+    }
+    lastReportedTransmitState = isTransmittingNow
+    onTransmitStateChanged(
+      isTransmittingNow,
+      isTransmittingNow ? activeMessage : inactiveMessage
+    )
   }
 
   private func writeToOutputStream(_ data: Data, stream: OutputStream) -> Bool {
@@ -1647,6 +1690,26 @@ private enum TransmissionMode {
 private struct VoiceActivationDecision {
   let shouldStartTransmitting: Bool
   let shouldStopTransmitting: Bool
+}
+
+private final class SpeechActivityTracker {
+  private let processor: VoiceActivationProcessor
+  private var isSpeaking = false
+
+  init(frameMillis: Int, sensitivity: Double) {
+    processor = VoiceActivationProcessor(frameMillis: frameMillis, sensitivity: sensitivity)
+  }
+
+  func process(_ frame: Data) -> Bool {
+    let decision = processor.process(frame)
+    if decision.shouldStartTransmitting {
+      isSpeaking = true
+    }
+    if decision.shouldStopTransmitting {
+      isSpeaking = false
+    }
+    return isSpeaking
+  }
 }
 
 private final class VoiceActivationProcessor {

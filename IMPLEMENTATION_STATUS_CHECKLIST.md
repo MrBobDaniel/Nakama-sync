@@ -31,7 +31,7 @@ This checklist compares the current codebase against [.ai-instructions.md](/home
 - `[x]` Android and iOS permission/platform config scaffolding is present.
   Evidence: [AndroidManifest.xml](/home/mrbobdaniel/Nakama-sync/app/android/app/src/main/AndroidManifest.xml#L2), [Info.plist](/home/mrbobdaniel/Nakama-sync/app/ios/Runner/Info.plist#L5)
 
-- `[x]` Android `ConnectionService` requirement is functionally integrated for self-managed walkie-talkie sessions.
+- `[x]` Android `ConnectionService` requirement is functionally integrated for self-managed Link sessions.
   Evidence: [CallConnectionService.kt](/home/mrbobdaniel/Nakama-sync/app/android/app/src/main/kotlin/com/nakamasync/app/CallConnectionService.kt#L12), [CommsSessionManager.kt](/home/mrbobdaniel/Nakama-sync/app/android/app/src/main/kotlin/com/nakamasync/app/CommsSessionManager.kt#L15), [NearbyConnectionsBridge.kt](/home/mrbobdaniel/Nakama-sync/app/android/app/src/main/kotlin/com/nakamasync/app/NearbyConnectionsBridge.kt#L94)
 
 - `[x]` iOS CallKit session management and audio-session handling are implemented for comms persistence.

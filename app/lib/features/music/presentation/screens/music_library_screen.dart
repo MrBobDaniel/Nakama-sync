@@ -29,7 +29,7 @@ class _MusicLibraryScreenState extends State<MusicLibraryScreen> {
           IconButton(
             onPressed: () => context.go('/comms'),
             icon: const Icon(Icons.wifi_tethering),
-            tooltip: 'Walkie-Talkie',
+            tooltip: 'Link',
           ),
         ],
       ),

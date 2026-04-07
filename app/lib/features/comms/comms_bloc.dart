@@ -123,13 +123,13 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       emit(
         currentState.copyWith(
           statusMessage:
-              'Voice-activated transmit is enabled. Use the mode switch to return to push-to-talk.',
+              'Voice activation is enabled. Use the mode switch to return to Hold to Talk.',
           diagnostics: _appendDiagnostic(
             currentState.diagnostics,
             const CommsDiagnosticEntry(
               event: 'push_to_talk_blocked',
               message:
-                  'Push-to-talk ignored while voice-activated transmit is enabled.',
+                  'Hold to Talk ignored while voice activation is enabled.',
             ),
             connectedPeers: currentState.connectedPeers,
             isDiscovering: false,
@@ -152,7 +152,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             currentState.diagnostics,
             const CommsDiagnosticEntry(
               event: 'push_to_talk_blocked',
-              message: 'Push-to-talk ignored because the microphone is muted.',
+              message: 'Hold to Talk ignored because the microphone is muted.',
             ),
             connectedPeers: currentState.connectedPeers,
             isDiscovering: false,
@@ -184,8 +184,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             CommsDiagnosticEntry(
               event: event.isActive ? 'push_to_talk_down' : 'push_to_talk_up',
               message: event.isActive
-                  ? 'Push-to-talk pressed.'
-                  : 'Push-to-talk released.',
+                  ? 'Hold to Talk pressed.'
+                  : 'Hold to Talk released.',
             ),
             connectedPeers: currentState.connectedPeers,
             isDiscovering: false,
@@ -324,7 +324,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
         event: 'transmit_mode_changed',
         message: event.mode == CommsTransmitMode.voiceActivated
             ? 'Voice-activated transmit enabled.'
-            : 'Push-to-talk mode enabled.',
+            : 'Hold to Talk enabled.',
       ),
       connectedPeers: state.diagnostics.connectedPeers,
       isDiscovering: state.diagnostics.isDiscovering,
@@ -806,13 +806,13 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
     String? fallbackMessage,
   }) {
     if (isTransmitting && isReceivingAudio) {
-      return 'Duplex audio is active with $connectedPeers peer(s) in room "$roomId".';
+      return 'Link is live with $connectedPeers peer(s) in room "$roomId".';
     }
     if (isTransmitting) {
-      return 'Transmitting to $connectedPeers peer(s) in room "$roomId".';
+      return 'Sending live voice to $connectedPeers peer(s) in room "$roomId".';
     }
     if (isReceivingAudio) {
-      return 'Receiving voice audio from room "$roomId".';
+      return 'Receiving live voice in room "$roomId".';
     }
     if (transmitMode == CommsTransmitMode.voiceActivated &&
         isVoiceActivationArmed) {

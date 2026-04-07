@@ -118,7 +118,7 @@ void main() {
     expect(find.text('Nakama Sync • Gym Set'), findsOneWidget);
   });
 
-  testWidgets('opens the comms lane from music', (WidgetTester tester) async {
+  testWidgets('opens Link from music', (WidgetTester tester) async {
     final repository = MockMusicRepository();
     final audioEngine = MockAudioEngine();
     final transportService = MockCommsTransportService();
@@ -145,15 +145,14 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Walkie-Talkie'));
+    await tester.tap(find.byTooltip('Link'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Walkie-Talkie'), findsOneWidget);
-    expect(find.text('Comms Lane'), findsOneWidget);
+    expect(find.text('Link'), findsWidgets);
     expect(find.text('Open Room'), findsOneWidget);
   });
 
-  testWidgets('ducks music volume while push-to-talk is active', (
+  testWidgets('ducks music volume while Hold to Talk is active', (
     WidgetTester tester,
   ) async {
     final repository = MockMusicRepository();
@@ -189,7 +188,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Walkie-Talkie'));
+    await tester.tap(find.byTooltip('Link'));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Open Room'));
@@ -203,7 +202,7 @@ void main() {
     });
     await tester.pump();
 
-    final context = tester.element(find.text('Comms Lane'));
+    final context = tester.element(find.text('Open Room'));
     context.read<CommsBloc>().add(const PushToTalkChanged(true));
     await tester.pumpAndSettle();
     context.read<CommsBloc>().add(const PushToTalkChanged(false));
@@ -253,7 +252,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Walkie-Talkie'));
+    await tester.tap(find.byTooltip('Link'));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Open Room'));
@@ -294,7 +293,7 @@ void main() {
   });
 
   testWidgets(
-    'shows duplex walkie-talkie state when transmitting and receiving',
+    'shows duplex Link state when transmitting and receiving',
     (WidgetTester tester) async {
       final repository = MockMusicRepository();
       final audioEngine = MockAudioEngine();
@@ -330,7 +329,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byTooltip('Walkie-Talkie'));
+      await tester.tap(find.byTooltip('Link'));
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('Open Room'));
@@ -344,7 +343,7 @@ void main() {
       });
       await tester.pump();
 
-      final context = tester.element(find.text('Comms Lane'));
+      final context = tester.element(find.text('Open Room'));
       context.read<CommsBloc>().add(const PushToTalkChanged(true));
       await tester.pumpAndSettle();
 
@@ -362,7 +361,7 @@ void main() {
       expect(find.text('LIVE TX/RX'), findsOneWidget);
       expect(
         find.text(
-          'Sending and receiving live voice with 2 peer(s) in room "gym-floor".',
+          'Link is live with 2 peer(s) in room "gym-floor".',
         ),
         findsOneWidget,
       );
@@ -407,7 +406,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byTooltip('Walkie-Talkie'));
+    await tester.tap(find.byTooltip('Link'));
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Open Room'));
@@ -421,12 +420,12 @@ void main() {
     });
     await tester.pumpAndSettle();
 
-    final broadcastFinder = find.text('Broadcast');
+    final broadcastFinder = find.text('Hold to Talk').last;
     await tester.ensureVisible(broadcastFinder);
     await tester.tap(broadcastFinder);
     await tester.pumpAndSettle();
-    expect(find.text('Broadcasting'), findsOneWidget);
-    await tester.tap(find.text('Broadcasting'));
+    expect(find.text('Link Live'), findsWidgets);
+    await tester.tap(find.text('Link Live').first);
     await tester.pumpAndSettle();
 
     await tester.ensureVisible(broadcastFinder);

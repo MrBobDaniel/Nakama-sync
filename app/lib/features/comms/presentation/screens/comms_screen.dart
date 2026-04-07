@@ -82,7 +82,7 @@ class _CommsScreenState extends State<CommsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Walkie-Talkie'),
+        title: const Text('Link'),
         actions: [
           IconButton(
             onPressed: () => context.go('/music'),
@@ -155,7 +155,7 @@ class _CommsScreenState extends State<CommsScreen> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       const Text(
-                        'Comms Lane',
+                        'Link',
                         style: TextStyle(
                           fontSize: 26,
                           fontWeight: FontWeight.w700,
@@ -163,7 +163,7 @@ class _CommsScreenState extends State<CommsScreen> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Join a room to advertise and discover peers with Nearby Connections, then stream push-to-talk audio over a low-latency payload stream.',
+                        'Join a room to discover nearby peers, then open a low-latency live link for voice.',
                         style: TextStyle(
                           color: Colors.white.withValues(alpha: 0.72),
                         ),
@@ -201,7 +201,7 @@ class _CommsScreenState extends State<CommsScreen> {
                                   ) =>
                                     isDiscovering
                                         ? '$statusMessage You can leave this screen while it listens in the background.'
-                                        : '$statusMessage You can keep using the app while this room waits for inbound connections.',
+                                        : '$statusMessage You can keep using the app while this room waits for inbound peers.',
                                   CommsConnected(
                                     :final isTransmitting,
                                     :final isReceivingAudio,
@@ -209,16 +209,16 @@ class _CommsScreenState extends State<CommsScreen> {
                                     :final statusMessage,
                                   ) =>
                                     isTransmitting && isReceivingAudio
-                                        ? 'Sending and receiving live voice with $connectedPeers peer(s) in room "$roomId".'
+                                        ? 'Link is live with $connectedPeers peer(s) in room "$roomId".'
                                         : isTransmitting
-                                        ? 'Transmitting to $connectedPeers peer(s) in room "$roomId".'
+                                        ? 'Sending live voice to $connectedPeers peer(s) in room "$roomId".'
                                         : isReceivingAudio
-                                        ? 'Receiving voice audio from ${activeSpeakers.length} active speaker(s) in room "$roomId".'
+                                        ? 'Receiving live voice from ${activeSpeakers.length} active peer(s) in room "$roomId".'
                                         : statusMessage,
                                   CommsFailure(:final message) => message,
                                   CommsInitial(:final statusMessage) =>
                                     statusMessage,
-                                  _ => 'Idle. No room joined yet.',
+                                  _ => 'Idle. No room open yet.',
                                 },
                                 style: TextStyle(
                                   color: Colors.white.withValues(alpha: 0.72),
@@ -340,7 +340,7 @@ class _CommsScreenState extends State<CommsScreen> {
                           CommsSessionOpen(:final isDiscovering) =>
                             isDiscovering
                                 ? 'Nearby is scanning briefly for matching room peers while keeping this room open for inbound connections.'
-                                : 'This room stays open for inbound connections without continuously scanning nearby devices.',
+                                : 'This room stays open for inbound peers without continuously scanning nearby devices.',
                           _ =>
                             'Nearby Connections handles discovery and connection setup. Next steps are runtime permissions, audio focus, and resilience/metrics.',
                         },
@@ -403,7 +403,7 @@ class _TransmitModeCard extends StatelessWidget {
                 ButtonSegment(
                   value: CommsTransmitMode.pushToTalk,
                   icon: Icon(Icons.touch_app),
-                  label: Text('Push-to-talk'),
+                  label: Text('Hold to Talk'),
                 ),
                 ButtonSegment(
                   value: CommsTransmitMode.voiceActivated,
@@ -419,7 +419,7 @@ class _TransmitModeCard extends StatelessWidget {
             const SizedBox(height: 12),
             Text(
               mode == CommsTransmitMode.pushToTalk
-                  ? 'Use the broadcast button exactly as before: tap to latch or hold for momentary talk.'
+                  ? 'Use the talk button exactly as before: tap to latch or hold to talk.'
                   : isMicrophoneMuted
                   ? 'Voice activation is disabled while the microphone is muted.'
                   : 'The mic stays armed while connected and opens transmit automatically when speech is detected.',
@@ -539,21 +539,21 @@ class _BroadcastPanel extends StatelessWidget {
                   : isDuplexActive
                   ? 'Duplex Active'
                   : isBroadcastActive || isTransmitting
-                  ? 'Broadcasting'
+                  ? 'Link Live'
                   : isReceivingAudio
                   ? 'Receiving Audio'
-                  : 'Broadcast',
+                  : 'Hold to Talk',
               style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 8),
             Text(
               isMicrophoneMuted
-                  ? 'Unmute to broadcast.'
+                  ? 'Unmute to use Link.'
                   : isDuplexActive
                   ? 'Mic and speaker are both live.'
-                  : isBroadcastActive
-                  ? 'Tap to stop. Hold for momentary talk.'
-                  : 'Tap to latch on. Hold to talk only while pressed.',
+                  : isBroadcastActive || isTransmitting
+                  ? 'Tap to stop'
+                  : 'Tap to lock on',
               style: TextStyle(color: Colors.white.withValues(alpha: 0.82)),
             ),
           ],
@@ -629,7 +629,7 @@ class _VoiceActivationPanel extends StatelessWidget {
                   : isDuplexActive
                   ? 'Duplex Active'
                   : isTransmitting
-                  ? 'Voice TX Active'
+                  ? 'Link Live'
                   : isVoiceActivationArmed
                   ? 'Voice Activation Armed'
                   : 'Voice Activation Idle',
@@ -916,14 +916,14 @@ class _AudioActivityBanner extends StatelessWidget {
         : isReceivingAudio
         ? 'Incoming Audio Detected'
         : isTransmitting
-        ? 'Broadcast Active'
+        ? 'Link Live'
         : 'Audio Idle';
     final String subtitle = isDuplexActive
         ? 'This device is sending microphone audio while receiving live voice in room "$roomId".'
         : isReceivingAudio
         ? 'Receiving live voice in room "$roomId" from $connectedPeers peer(s).'
         : isTransmitting
-        ? 'This device is currently sending microphone audio.'
+        ? 'This device is currently sending live voice to the room.'
         : 'No live voice packets are being received right now.';
 
     return Container(

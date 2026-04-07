@@ -504,6 +504,9 @@ class NearbyConnectionsBridge(
             return
         }
         peerSessions[endpointId] = existing.copy(isSpeaking = isSpeaking)
+        communicationAudioController.updatePlaybackDucking(
+            duckExternalAudio = peerSessions.values.any { it.isConnected && it.isSpeaking },
+        )
         emit(
             "receive_state",
             if (isSpeaking) {
@@ -1038,6 +1041,10 @@ class NearbyConnectionsBridge(
     ) {
         private val lock = Any()
         private val chunks = ArrayDeque<ByteArray>()
+        private val speechActivityTracker = SpeechActivityTracker(
+            frameMillis = STREAM_CHUNK_MILLIS,
+            sensitivity = 0.55,
+        )
         private var headOffset = 0
         private var queuedBytes = 0
 
@@ -1077,6 +1084,12 @@ class NearbyConnectionsBridge(
             }
         }
 
+        fun updateSpeechActivity(frame: ByteArray): Boolean {
+            synchronized(lock) {
+                return speechActivityTracker.process(frame)
+            }
+        }
+
         private fun trimLocked() {
             val maxBufferedBytes = frameBytes * MAX_BUFFERED_FRAMES
             while (queuedBytes > maxBufferedBytes && chunks.isNotEmpty()) {
@@ -1107,8 +1120,9 @@ class NearbyConnectionsBridge(
                 inputStream = BufferedInputStream(inputStream),
                 frameBytes = frameBytes(),
                 onAudioData = { bytes ->
-                    peerBuffers[endpointId]?.append(bytes)
-                    onPeerSpeakingChanged(endpointId, true)
+                    val peerBuffer = peerBuffers[endpointId] ?: return@ReaderWorker
+                    peerBuffer.append(bytes)
+                    onPeerSpeakingChanged(endpointId, peerBuffer.updateSpeechActivity(bytes))
                 },
                 onFinished = {
                     stopEndpoint(endpointId)
@@ -1313,7 +1327,9 @@ class NearbyConnectionsBridge(
                 return
             }
 
-            communicationAudioController.acquireCapture()
+            communicationAudioController.acquireCapture(
+                duckExternalAudio = captureMode == CaptureMode.MANUAL,
+            )
             val minBufferSize = AudioRecord.getMinBufferSize(
                 sampleRate,
                 AudioFormat.CHANNEL_IN_MONO,
@@ -1520,6 +1536,9 @@ class NearbyConnectionsBridge(
                 return
             }
             isCurrentlyTransmitting = isTransmitting
+            communicationAudioController.updateCaptureDucking(
+                duckExternalAudio = captureMode == CaptureMode.MANUAL || isTransmitting,
+            )
             onTransmitStateChanged(isTransmitting, message)
         }
 
@@ -1657,6 +1676,72 @@ class NearbyConnectionsBridge(
         val shouldStopTransmitting: Boolean,
     )
 
+    private class SpeechActivityTracker(
+        private val frameMillis: Int,
+        sensitivity: Double,
+    ) {
+        private var dynamicFloor = 0.008
+        private var attackFrames = 0
+        private var releaseFrames = 0
+        private var isSpeechActive = false
+        private var sensitivity = sensitivity
+
+        fun process(frame: ByteArray): Boolean {
+            val rms = frameRms(frame)
+            val attackBoost = 0.02 - (sensitivity * 0.012)
+            val releaseBoost = attackBoost * 0.55
+            val startThreshold = max(dynamicFloor * 2.1, dynamicFloor + attackBoost)
+            val stopThreshold = max(dynamicFloor * 1.45, dynamicFloor + releaseBoost)
+
+            if (!isSpeechActive || rms < stopThreshold) {
+                dynamicFloor = (dynamicFloor * 0.985) + (rms * 0.015)
+            } else {
+                dynamicFloor = (dynamicFloor * 0.998) + (rms * 0.002)
+            }
+
+            if (!isSpeechActive) {
+                if (rms >= startThreshold) {
+                    attackFrames += 1
+                    if (attackFrames >= VOICE_ATTACK_FRAMES) {
+                        attackFrames = 0
+                        releaseFrames = 0
+                        isSpeechActive = true
+                    }
+                } else {
+                    attackFrames = 0
+                }
+            } else if (rms < stopThreshold) {
+                releaseFrames += 1
+                if (releaseFrames * frameMillis >= VOICE_RELEASE_HANGOVER_MILLIS) {
+                    releaseFrames = 0
+                    attackFrames = 0
+                    isSpeechActive = false
+                }
+            } else {
+                releaseFrames = 0
+            }
+
+            return isSpeechActive
+        }
+
+        private fun frameRms(frame: ByteArray): Double {
+            var sumSquares = 0.0
+            var sampleCount = 0
+            var index = 0
+            while (index + 1 < frame.size) {
+                val sample = ((frame[index].toInt() and 0xFF) or (frame[index + 1].toInt() shl 8)).toShort()
+                val normalized = sample / 32768.0
+                sumSquares += normalized * normalized
+                sampleCount += 1
+                index += PCM_BYTES_PER_SAMPLE
+            }
+            if (sampleCount == 0) {
+                return 0.0
+            }
+            return kotlin.math.sqrt(sumSquares / sampleCount.toDouble())
+        }
+    }
+
     private class CommunicationAudioController(
         context: Context,
     ) {
@@ -1665,9 +1750,11 @@ class NearbyConnectionsBridge(
         private val lock = Any()
         private var playbackUsers = 0
         private var captureUsers = 0
+        private var duckingCaptureUsers = 0
+        private var playbackDuckingActive = false
         private var audioFocusRequest: AudioFocusRequest? = null
+        private var isLegacyFocusHeld = false
         private var previousMode: Int? = null
-        private var previousSpeakerphoneState: Boolean? = null
         private var previousMicrophoneMuteState: Boolean? = null
 
         fun acquirePlayback() {
@@ -1676,11 +1763,16 @@ class NearbyConnectionsBridge(
                 playbackUsers += 1
                 if (!hadUsers) {
                     previousMode = audioManager.mode
-                    previousSpeakerphoneState = audioManager.isSpeakerphoneOn
                     previousMicrophoneMuteState = audioManager.isMicrophoneMute
-                    requestFocusLocked()
                 }
-                applyRouteLocked()
+                applyAudioStateLocked()
+            }
+        }
+
+        fun updatePlaybackDucking(duckExternalAudio: Boolean) {
+            synchronized(lock) {
+                playbackDuckingActive = duckExternalAudio && playbackUsers > 0
+                applyAudioStateLocked()
             }
         }
 
@@ -1690,24 +1782,28 @@ class NearbyConnectionsBridge(
                     return
                 }
                 playbackUsers -= 1
-                applyRouteLocked()
+                if (playbackUsers == 0) {
+                    playbackDuckingActive = false
+                }
+                applyAudioStateLocked()
                 if (totalUsers() == 0) {
                     restoreLocked()
                 }
             }
         }
 
-        fun acquireCapture() {
+        fun acquireCapture(duckExternalAudio: Boolean) {
             synchronized(lock) {
                 val hadUsers = totalUsers() > 0
                 captureUsers += 1
+                if (duckExternalAudio) {
+                    duckingCaptureUsers += 1
+                }
                 if (!hadUsers) {
                     previousMode = audioManager.mode
-                    previousSpeakerphoneState = audioManager.isSpeakerphoneOn
                     previousMicrophoneMuteState = audioManager.isMicrophoneMute
-                    requestFocusLocked()
                 }
-                applyRouteLocked()
+                applyAudioStateLocked()
             }
         }
 
@@ -1717,21 +1813,35 @@ class NearbyConnectionsBridge(
                     return
                 }
                 captureUsers -= 1
-                applyRouteLocked()
+                duckingCaptureUsers = duckingCaptureUsers.coerceAtMost(captureUsers)
+                applyAudioStateLocked()
                 if (totalUsers() == 0) {
                     restoreLocked()
                 }
             }
         }
 
+        fun updateCaptureDucking(duckExternalAudio: Boolean) {
+            synchronized(lock) {
+                if (captureUsers == 0) {
+                    return
+                }
+                duckingCaptureUsers = if (duckExternalAudio) captureUsers else 0
+                applyAudioStateLocked()
+            }
+        }
+
         private fun totalUsers(): Int = playbackUsers + captureUsers
+        private fun shouldHoldFocus(): Boolean = playbackDuckingActive || duckingCaptureUsers > 0
+        private fun shouldUseCommunicationMode(): Boolean = playbackUsers > 0 || duckingCaptureUsers > 0
 
         private fun requestFocusLocked() {
-            val focusGain = AudioManager.AUDIOFOCUS_GAIN
+            val focusGain = AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val request = AudioFocusRequest.Builder(focusGain)
                     .setOnAudioFocusChangeListener(focusChangeListener)
                     .setAcceptsDelayedFocusGain(false)
+                    .setWillPauseWhenDucked(false)
                     .setAudioAttributes(
                         AudioAttributes.Builder()
                             .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
@@ -1743,39 +1853,56 @@ class NearbyConnectionsBridge(
                 audioManager.requestAudioFocus(request)
             } else {
                 @Suppress("DEPRECATION")
-                audioManager.requestAudioFocus(
+                val focusResult = audioManager.requestAudioFocus(
                     focusChangeListener,
                     AudioManager.STREAM_MUSIC,
                     focusGain,
                 )
+                isLegacyFocusHeld = focusResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
             }
         }
 
-        private fun applyRouteLocked() {
+        private fun applyAudioStateLocked() {
             if (totalUsers() == 0) {
                 return
             }
-            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-            audioManager.isSpeakerphoneOn = true
+            if (shouldHoldFocus()) {
+                if ((Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && audioFocusRequest == null) ||
+                    (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && !isLegacyFocusHeld)
+                ) {
+                    requestFocusLocked()
+                }
+            } else {
+                abandonFocusLocked()
+            }
+            audioManager.mode = if (shouldUseCommunicationMode()) {
+                AudioManager.MODE_IN_COMMUNICATION
+            } else {
+                previousMode ?: AudioManager.MODE_NORMAL
+            }
             if (captureUsers > 0) {
                 audioManager.isMicrophoneMute = false
             }
         }
 
         private fun restoreLocked() {
+            abandonFocusLocked()
             previousMode?.let { audioManager.mode = it }
-            previousSpeakerphoneState?.let { audioManager.isSpeakerphoneOn = it }
             previousMicrophoneMuteState?.let { audioManager.isMicrophoneMute = it }
             previousMode = null
-            previousSpeakerphoneState = null
             previousMicrophoneMuteState = null
+            duckingCaptureUsers = 0
+            playbackDuckingActive = false
+        }
 
+        private fun abandonFocusLocked() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 audioFocusRequest?.let(audioManager::abandonAudioFocusRequest)
                 audioFocusRequest = null
             } else {
                 @Suppress("DEPRECATION")
                 audioManager.abandonAudioFocus(focusChangeListener)
+                isLegacyFocusHeld = false
             }
         }
     }
