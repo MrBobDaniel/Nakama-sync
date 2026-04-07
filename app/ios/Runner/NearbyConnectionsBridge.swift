@@ -50,22 +50,28 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       self?.commsSessionManager.deactivateVoiceAudio()
     },
     onError: { [weak self] message in
-      self?.emit(event: "error", message: message)
+      DispatchQueue.main.async {
+        self?.emit(event: "error", message: message)
+      }
     },
     onTransmitStateChanged: { [weak self] isTransmitting, message in
-      guard let self else { return }
-      self.syncOSAudioState()
-      self.emit(
-        event: "transmit_state",
-        message: message,
-        extra: [
-          "isTransmitting": isTransmitting,
-          "audioSampleRate": NearbyAudioConfig.defaultStreamSampleRate
-        ]
-      )
+      DispatchQueue.main.async {
+        guard let self else { return }
+        self.syncOSAudioState()
+        self.emit(
+          event: "transmit_state",
+          message: message,
+          extra: [
+            "isTransmitting": isTransmitting,
+            "audioSampleRate": NearbyAudioConfig.defaultStreamSampleRate
+          ]
+        )
+      }
     },
     onPeerSpeakingChanged: { [weak self] endpointID, isSpeaking in
-      self?.updatePeerSpeaking(endpointID, isSpeaking: isSpeaking)
+      DispatchQueue.main.async {
+        self?.updatePeerSpeaking(endpointID, isSpeaking: isSpeaking)
+      }
     }
   )
   #endif
@@ -388,36 +394,45 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   }
 
   private func emit(event: String, message: String, extra: [String: Any] = [:]) {
-    let currentRoomID = normalizedRoomID()
-    var payload: [String: Any] = [
-      "event": event,
-      "message": message,
-      "roomId": currentRoomID ?? NSNull(),
-      "connectedPeers": connectedEndpoints.filter { endpointRoomMatches[$0] == true }.count,
-      "isDiscovering": isDiscovering,
-      "isReceivingAudio": peerSessions.values.contains { $0.isConnected && $0.isSpeaking },
-      "isTransmitting": audioController.isTransmitting,
-      "transmitMode": isVoiceActivationEnabled ? "voice_activated" : "push_to_talk",
-      "isVoiceActivationArmed": audioController.isVoiceActivationArmed,
-      "peers": peerSessions.values
-        .sorted {
-          if $0.isConnected == $1.isConnected {
-            return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+    let deliver = { [weak self] in
+      guard let self else { return }
+      let currentRoomID = self.normalizedRoomID()
+      var payload: [String: Any] = [
+        "event": event,
+        "message": message,
+        "roomId": currentRoomID ?? NSNull(),
+        "connectedPeers": self.connectedEndpoints.filter { self.endpointRoomMatches[$0] == true }.count,
+        "isDiscovering": self.isDiscovering,
+        "isReceivingAudio": self.peerSessions.values.contains { $0.isConnected && $0.isSpeaking },
+        "isTransmitting": self.audioController.isTransmitting,
+        "transmitMode": self.isVoiceActivationEnabled ? "voice_activated" : "push_to_talk",
+        "isVoiceActivationArmed": self.audioController.isVoiceActivationArmed,
+        "peers": self.peerSessions.values
+          .sorted {
+            if $0.isConnected == $1.isConnected {
+              return $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+            return $0.isConnected && !$1.isConnected
           }
-          return $0.isConnected && !$1.isConnected
-        }
-        .map { peer in
-          [
-            "peerId": peer.endpointID,
-            "displayName": peer.displayName,
-            "isConnected": peer.isConnected,
-            "isSpeaking": peer.isSpeaking,
-            "streamSampleRate": peer.streamSampleRate,
-          ]
-        }
-    ]
-    extra.forEach { payload[$0.key] = $0.value }
-    eventSink?(payload)
+          .map { peer in
+            [
+              "peerId": peer.endpointID,
+              "displayName": peer.displayName,
+              "isConnected": peer.isConnected,
+              "isSpeaking": peer.isSpeaking,
+              "streamSampleRate": peer.streamSampleRate,
+            ]
+          }
+      ]
+      extra.forEach { payload[$0.key] = $0.value }
+      self.eventSink?(payload)
+    }
+
+    if Thread.isMainThread {
+      deliver()
+    } else {
+      DispatchQueue.main.async(execute: deliver)
+    }
   }
 
   private func upsertPeer(
