@@ -437,7 +437,7 @@ class NearbyConnectionsBridge(
             "connectedPeers" to activeEndpoints.count { endpointRoomMatches[it] == true },
             "isDiscovering" to isDiscovering,
             "isReceivingAudio" to peerSessions.values.any { it.isSpeaking && it.isConnected },
-            "isTransmitting" to (outgoingAudioFanout?.isRunning() == true),
+            "isTransmitting" to (outgoingAudioFanout?.isTransmittingActive() == true),
             "transmitMode" to if (isVoiceActivationEnabled) "voice_activated" else "push_to_talk",
             "isVoiceActivationArmed" to (outgoingAudioFanout?.isVoiceActivationArmed() == true),
             "peers" to peerSessions.values
@@ -460,7 +460,7 @@ class NearbyConnectionsBridge(
                 connectedPeers = activeEndpoints.count { endpointRoomMatches[it] == true },
                 isDiscovering = isDiscovering,
                 isReceivingAudio = peerSessions.values.any { it.isSpeaking && it.isConnected },
-                isTransmitting = outgoingAudioFanout?.isRunning() == true,
+                isTransmitting = outgoingAudioFanout?.isTransmittingActive() == true,
                 statusMessage = message,
                 isSessionOpen = roomId != null,
             )
@@ -1425,6 +1425,8 @@ class NearbyConnectionsBridge(
         }
 
         fun isRunning(): Boolean = isRunning.get()
+
+        fun isTransmittingActive(): Boolean = isCurrentlyTransmitting
 
         private fun handleCapturedFrame(frame: ByteArray) {
             if (captureMode == CaptureMode.MANUAL) {
