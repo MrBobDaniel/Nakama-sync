@@ -293,6 +293,84 @@ void main() {
     await transportEvents.close();
   });
 
+  testWidgets(
+    'shows duplex walkie-talkie state when transmitting and receiving',
+    (WidgetTester tester) async {
+      final repository = MockMusicRepository();
+      final audioEngine = MockAudioEngine();
+      final transportEvents =
+          StreamController<Map<String, dynamic>>.broadcast();
+      final transportService = MockCommsTransportService();
+
+      when(
+        () => repository.fetchPlaylists(),
+      ).thenAnswer((_) async => const <Playlist>[]);
+      when(() => audioEngine.dispose()).thenAnswer((_) async {});
+      when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
+      when(() => transportService.dispose()).thenAnswer((_) async {});
+      when(() => transportService.initialize(any())).thenAnswer((_) async {});
+      when(
+        () => transportService.setPushToTalkActive(any()),
+      ).thenAnswer((_) async {});
+      when(
+        () => transportService.events,
+      ).thenAnswer((_) => transportEvents.stream);
+
+      await tester.pumpWidget(
+        NakamaSyncApp(
+          appConfig: const AppConfig(
+            navidromeBaseUrl: 'http://localhost:4533',
+            navidromeUsername: 'tester',
+            navidromePassword: 'secret',
+          ),
+          musicRepository: repository,
+          audioEngine: audioEngine,
+          commsTransportService: transportService,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Walkie-Talkie'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Open Room'));
+      await tester.pump();
+
+      transportEvents.add(const {
+        'event': 'connected',
+        'roomId': 'gym-floor',
+        'connectedPeers': 2,
+        'message': 'Connected over Nearby Connections.',
+      });
+      await tester.pump();
+
+      final context = tester.element(find.text('Comms Lane'));
+      context.read<CommsBloc>().add(const PushToTalkChanged(true));
+      await tester.pumpAndSettle();
+
+      transportEvents.add(const {
+        'event': 'receive_state',
+        'roomId': 'gym-floor',
+        'connectedPeers': 2,
+        'message': 'Nearby peer is speaking.',
+        'isReceivingAudio': true,
+      });
+      await tester.pumpAndSettle();
+
+      expect(find.text('Duplex Active'), findsOneWidget);
+      expect(find.text('Duplex Audio Active'), findsOneWidget);
+      expect(find.text('LIVE TX/RX'), findsOneWidget);
+      expect(
+        find.text(
+          'Sending and receiving live voice with 2 peer(s) in room "gym-floor".',
+        ),
+        findsOneWidget,
+      );
+
+      await transportEvents.close();
+    },
+  );
+
   testWidgets('broadcast button toggles on tap and holds on long press', (
     WidgetTester tester,
   ) async {

@@ -29,6 +29,22 @@ class NearbyConnectionsService implements CommsTransportService {
   }
 
   @override
+  Future<void> configureVoiceActivation({
+    required bool isEnabled,
+    required double sensitivity,
+  }) {
+    return NearbyConnectionsManager.configureVoiceActivation(
+      isEnabled: isEnabled,
+      sensitivity: sensitivity,
+    );
+  }
+
+  @override
+  Future<void> setMicrophoneMuted(bool isMuted) {
+    return NearbyConnectionsManager.setMicrophoneMuted(isMuted);
+  }
+
+  @override
   Future<void> dispose() {
     return NearbyConnectionsManager.stopSession();
   }

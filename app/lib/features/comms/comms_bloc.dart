@@ -14,6 +14,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
     on<DisconnectRequested>(_onDisconnectRequested);
     on<PushToTalkChanged>(_onPushToTalkChanged);
     on<MicrophoneMuteChanged>(_onMicrophoneMuteChanged);
+    on<TransmitModeChanged>(_onTransmitModeChanged);
+    on<VoiceActivationSensitivityChanged>(_onVoiceActivationSensitivityChanged);
     on<TransportStatusChanged>(_onTransportStatusChanged);
 
     _transportSubscription = _transportService.events.listen(
@@ -38,6 +40,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       isDiscovering: true,
       isTransmitting: false,
       isReceivingAudio: false,
+      isVoiceActivationArmed: false,
+      transmitMode: state.transmitMode,
     );
     emit(
       CommsSessionOpen(
@@ -45,6 +49,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
         statusMessage: 'Opening room for nearby connections.',
         diagnostics: diagnostics,
         isMicrophoneMuted: state.isMicrophoneMuted,
+        transmitMode: state.transmitMode,
+        voiceActivationSensitivity: state.voiceActivationSensitivity,
         peers: state.peers,
       ),
     );
@@ -66,8 +72,12 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             isDiscovering: false,
             isTransmitting: false,
             isReceivingAudio: false,
+            isVoiceActivationArmed: false,
+            transmitMode: state.transmitMode,
           ),
           isMicrophoneMuted: state.isMicrophoneMuted,
+          transmitMode: state.transmitMode,
+          voiceActivationSensitivity: state.voiceActivationSensitivity,
         ),
       );
     }
@@ -90,8 +100,12 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
           isDiscovering: false,
           isTransmitting: false,
           isReceivingAudio: false,
+          isVoiceActivationArmed: false,
+          transmitMode: state.transmitMode,
         ),
         isMicrophoneMuted: state.isMicrophoneMuted,
+        transmitMode: state.transmitMode,
+        voiceActivationSensitivity: state.voiceActivationSensitivity,
       ),
     );
   }
@@ -102,6 +116,30 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
   ) async {
     final currentState = state;
     if (currentState is! CommsConnected) {
+      return;
+    }
+
+    if (currentState.transmitMode == CommsTransmitMode.voiceActivated) {
+      emit(
+        currentState.copyWith(
+          statusMessage:
+              'Voice-activated transmit is enabled. Use the mode switch to return to push-to-talk.',
+          diagnostics: _appendDiagnostic(
+            currentState.diagnostics,
+            const CommsDiagnosticEntry(
+              event: 'push_to_talk_blocked',
+              message:
+                  'Push-to-talk ignored while voice-activated transmit is enabled.',
+            ),
+            connectedPeers: currentState.connectedPeers,
+            isDiscovering: false,
+            isTransmitting: currentState.isTransmitting,
+            isReceivingAudio: currentState.isReceivingAudio,
+            isVoiceActivationArmed: currentState.isVoiceActivationArmed,
+            transmitMode: currentState.transmitMode,
+          ),
+        ),
+      );
       return;
     }
 
@@ -120,6 +158,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             isDiscovering: false,
             isTransmitting: false,
             isReceivingAudio: currentState.isReceivingAudio,
+            isVoiceActivationArmed: currentState.isVoiceActivationArmed,
+            transmitMode: currentState.transmitMode,
           ),
         ),
       );
@@ -131,6 +171,14 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       emit(
         currentState.copyWith(
           isTransmitting: event.isActive,
+          statusMessage: _connectedStatusMessage(
+            roomId: currentState.roomId,
+            connectedPeers: currentState.connectedPeers,
+            isTransmitting: event.isActive,
+            isReceivingAudio: currentState.isReceivingAudio,
+            transmitMode: currentState.transmitMode,
+            isVoiceActivationArmed: currentState.isVoiceActivationArmed,
+          ),
           diagnostics: _appendDiagnostic(
             currentState.diagnostics,
             CommsDiagnosticEntry(
@@ -143,6 +191,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             isDiscovering: false,
             isTransmitting: event.isActive,
             isReceivingAudio: currentState.isReceivingAudio,
+            isVoiceActivationArmed: currentState.isVoiceActivationArmed,
+            transmitMode: currentState.transmitMode,
           ),
         ),
       );
@@ -161,6 +211,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             isDiscovering: false,
             isTransmitting: false,
             isReceivingAudio: currentState.isReceivingAudio,
+            isVoiceActivationArmed: currentState.isVoiceActivationArmed,
+            transmitMode: currentState.transmitMode,
           ),
         ),
       );
@@ -183,15 +235,10 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       isDiscovering: state.diagnostics.isDiscovering,
       isTransmitting: false,
       isReceivingAudio: state.diagnostics.isReceivingAudio,
+      isVoiceActivationArmed:
+          event.isMuted ? false : state.diagnostics.isVoiceActivationArmed,
+      transmitMode: state.transmitMode,
     );
-
-    if (event.isMuted &&
-        state is CommsConnected &&
-        state.diagnostics.isTransmitting) {
-      try {
-        await _transportService.setPushToTalkActive(false);
-      } catch (_) {}
-    }
 
     switch (state) {
       case CommsConnected currentState:
@@ -200,9 +247,22 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             isTransmitting: false,
             statusMessage: event.isMuted
                 ? 'Microphone muted on this device.'
-                : currentState.statusMessage,
+                : _connectedStatusMessage(
+                    roomId: currentState.roomId,
+                    connectedPeers: currentState.connectedPeers,
+                    isTransmitting: false,
+                    isReceivingAudio: currentState.isReceivingAudio,
+                    transmitMode: currentState.transmitMode,
+                    isVoiceActivationArmed:
+                        !event.isMuted &&
+                        currentState.transmitMode ==
+                            CommsTransmitMode.voiceActivated,
+                  ),
             diagnostics: diagnostics,
             isMicrophoneMuted: event.isMuted,
+            isVoiceActivationArmed:
+                !event.isMuted &&
+                currentState.transmitMode == CommsTransmitMode.voiceActivated,
           ),
         );
       case CommsSessionOpen currentState:
@@ -219,6 +279,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             roomId: currentState.roomId,
             diagnostics: diagnostics,
             isMicrophoneMuted: event.isMuted,
+            transmitMode: currentState.transmitMode,
+            voiceActivationSensitivity: currentState.voiceActivationSensitivity,
           ),
         );
       case CommsInitial currentState:
@@ -227,6 +289,185 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             statusMessage: currentState.statusMessage,
             diagnostics: diagnostics,
             isMicrophoneMuted: event.isMuted,
+            transmitMode: currentState.transmitMode,
+            voiceActivationSensitivity: currentState.voiceActivationSensitivity,
+          ),
+        );
+    }
+
+    if (state is CommsConnected && state.diagnostics.isTransmitting) {
+      try {
+        await _transportService.setPushToTalkActive(false);
+      } catch (_) {}
+    }
+
+    try {
+      await _transportService.setMicrophoneMuted(event.isMuted);
+      if (state is CommsConnected) {
+        await _transportService.configureVoiceActivation(
+          isEnabled:
+              !event.isMuted &&
+              state.transmitMode == CommsTransmitMode.voiceActivated,
+          sensitivity: state.voiceActivationSensitivity,
+        );
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _onTransmitModeChanged(
+    TransmitModeChanged event,
+    Emitter<CommsState> emit,
+  ) async {
+    final diagnostics = _appendDiagnostic(
+      state.diagnostics,
+      CommsDiagnosticEntry(
+        event: 'transmit_mode_changed',
+        message: event.mode == CommsTransmitMode.voiceActivated
+            ? 'Voice-activated transmit enabled.'
+            : 'Push-to-talk mode enabled.',
+      ),
+      connectedPeers: state.diagnostics.connectedPeers,
+      isDiscovering: state.diagnostics.isDiscovering,
+      isTransmitting: false,
+      isReceivingAudio: state.diagnostics.isReceivingAudio,
+      isVoiceActivationArmed:
+          !state.isMicrophoneMuted &&
+          event.mode == CommsTransmitMode.voiceActivated,
+      transmitMode: event.mode,
+    );
+
+    Future<void> syncTransportForConnectedState(CommsConnected currentState) async {
+      await _transportService.setPushToTalkActive(false);
+      await _transportService.configureVoiceActivation(
+        isEnabled:
+            event.mode == CommsTransmitMode.voiceActivated &&
+            !currentState.isMicrophoneMuted,
+        sensitivity: currentState.voiceActivationSensitivity,
+      );
+    }
+
+    switch (state) {
+      case CommsConnected currentState:
+        try {
+          await syncTransportForConnectedState(currentState);
+        } catch (_) {}
+        emit(
+          currentState.copyWith(
+            isTransmitting: false,
+            transmitMode: event.mode,
+            isVoiceActivationArmed:
+                !currentState.isMicrophoneMuted &&
+                event.mode == CommsTransmitMode.voiceActivated,
+            diagnostics: diagnostics,
+            statusMessage: _connectedStatusMessage(
+              roomId: currentState.roomId,
+              connectedPeers: currentState.connectedPeers,
+              isTransmitting: false,
+              isReceivingAudio: currentState.isReceivingAudio,
+              transmitMode: event.mode,
+              isVoiceActivationArmed:
+                  !currentState.isMicrophoneMuted &&
+                  event.mode == CommsTransmitMode.voiceActivated,
+            ),
+          ),
+        );
+      case CommsSessionOpen currentState:
+        emit(
+          currentState.copyWith(
+            transmitMode: event.mode,
+            isVoiceActivationArmed: false,
+            diagnostics: diagnostics,
+          ),
+        );
+      case CommsFailure currentState:
+        emit(
+          CommsFailure(
+            currentState.message,
+            roomId: currentState.roomId,
+            diagnostics: diagnostics,
+            isMicrophoneMuted: currentState.isMicrophoneMuted,
+            transmitMode: event.mode,
+            voiceActivationSensitivity: currentState.voiceActivationSensitivity,
+          ),
+        );
+      case CommsInitial currentState:
+        emit(
+          CommsInitial(
+            statusMessage: currentState.statusMessage,
+            diagnostics: diagnostics,
+            isMicrophoneMuted: currentState.isMicrophoneMuted,
+            transmitMode: event.mode,
+            voiceActivationSensitivity: currentState.voiceActivationSensitivity,
+          ),
+        );
+    }
+  }
+
+  Future<void> _onVoiceActivationSensitivityChanged(
+    VoiceActivationSensitivityChanged event,
+    Emitter<CommsState> emit,
+  ) async {
+    final clampedSensitivity = event.sensitivity.clamp(0.0, 1.0);
+    final diagnostics = _appendDiagnostic(
+      state.diagnostics,
+      CommsDiagnosticEntry(
+        event: 'voice_activation_sensitivity_changed',
+        message:
+            'Voice activation sensitivity set to ${_voiceSensitivityLabel(clampedSensitivity)}.',
+      ),
+      connectedPeers: state.diagnostics.connectedPeers,
+      isDiscovering: state.diagnostics.isDiscovering,
+      isTransmitting: state.diagnostics.isTransmitting,
+      isReceivingAudio: state.diagnostics.isReceivingAudio,
+      isVoiceActivationArmed: state.diagnostics.isVoiceActivationArmed,
+      transmitMode: state.transmitMode,
+    );
+
+    if (state is CommsConnected &&
+        state.transmitMode == CommsTransmitMode.voiceActivated &&
+        !state.isMicrophoneMuted) {
+      try {
+        await _transportService.configureVoiceActivation(
+          isEnabled: true,
+          sensitivity: clampedSensitivity,
+        );
+      } catch (_) {}
+    }
+
+    switch (state) {
+      case CommsConnected currentState:
+        emit(
+          currentState.copyWith(
+            voiceActivationSensitivity: clampedSensitivity,
+            diagnostics: diagnostics,
+          ),
+        );
+      case CommsSessionOpen currentState:
+        emit(
+          currentState.copyWith(
+            voiceActivationSensitivity: clampedSensitivity,
+            diagnostics: diagnostics,
+          ),
+        );
+      case CommsFailure currentState:
+        emit(
+          CommsFailure(
+            currentState.message,
+            roomId: currentState.roomId,
+            diagnostics: diagnostics,
+            isMicrophoneMuted: currentState.isMicrophoneMuted,
+            transmitMode: currentState.transmitMode,
+            voiceActivationSensitivity: clampedSensitivity,
+          ),
+        );
+      case CommsInitial currentState:
+        emit(
+          CommsInitial(
+            statusMessage: currentState.statusMessage,
+            diagnostics: diagnostics,
+            isMicrophoneMuted: currentState.isMicrophoneMuted,
+            transmitMode: currentState.transmitMode,
+            voiceActivationSensitivity: clampedSensitivity,
           ),
         );
     }
@@ -253,6 +494,11 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
     final peers = _peersFromPayload(payload, fallback: state.peers);
     final connectedPeerCount = _connectedPeerCount(payload, peers);
     final isReceivingAudio = _receivingAudioFromPayload(payload, peers);
+    final transmitMode = _transmitModeFromPayload(payload, state.transmitMode);
+    final isVoiceActivationArmed = _voiceActivationArmedFromPayload(
+      payload,
+      fallback: state.isVoiceActivationArmed,
+    );
 
     switch (eventType) {
       case 'session_started':
@@ -267,6 +513,9 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
               peers: peers,
               diagnostics: diagnostics,
               isMicrophoneMuted: state.isMicrophoneMuted,
+              transmitMode: transmitMode,
+              voiceActivationSensitivity: state.voiceActivationSensitivity,
+              isVoiceActivationArmed: isVoiceActivationArmed,
             ),
           );
         }
@@ -281,6 +530,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
               isDiscovering: false,
               peers: peers,
               diagnostics: diagnostics,
+              isVoiceActivationArmed: isVoiceActivationArmed,
             ),
           );
         }
@@ -296,6 +546,9 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
               peers: peers,
               diagnostics: diagnostics,
               isMicrophoneMuted: state.isMicrophoneMuted,
+              transmitMode: transmitMode,
+              voiceActivationSensitivity: state.voiceActivationSensitivity,
+              isVoiceActivationArmed: isVoiceActivationArmed,
             ),
           );
         }
@@ -306,12 +559,24 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
               roomId,
               connectedPeers: connectedPeerCount,
               isReceivingAudio: isReceivingAudio,
-              statusMessage:
-                  payload['message'] as String? ??
-                  'Connected over Nearby Connections.',
+              isTransmitting: diagnostics.isTransmitting,
+              statusMessage: _connectedStatusMessage(
+                roomId: roomId,
+                connectedPeers: connectedPeerCount,
+                isTransmitting: diagnostics.isTransmitting,
+                isReceivingAudio: isReceivingAudio,
+                transmitMode: transmitMode,
+                isVoiceActivationArmed: isVoiceActivationArmed,
+                fallbackMessage:
+                    payload['message'] as String? ??
+                    'Connected over Nearby Connections.',
+              ),
               peers: peers,
               diagnostics: diagnostics,
               isMicrophoneMuted: state.isMicrophoneMuted,
+              transmitMode: transmitMode,
+              voiceActivationSensitivity: state.voiceActivationSensitivity,
+              isVoiceActivationArmed: isVoiceActivationArmed,
             ),
           );
         }
@@ -321,11 +586,20 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
           emit(
             currentState.copyWith(
               isTransmitting: payload['isTransmitting'] as bool? ?? false,
-              statusMessage:
-                  payload['message'] as String? ?? currentState.statusMessage,
+              statusMessage: _connectedStatusMessage(
+                roomId: currentState.roomId,
+                connectedPeers: connectedPeerCount,
+                isTransmitting: payload['isTransmitting'] as bool? ?? false,
+                isReceivingAudio: currentState.isReceivingAudio,
+                transmitMode: transmitMode,
+                isVoiceActivationArmed: isVoiceActivationArmed,
+                fallbackMessage: payload['message'] as String?,
+              ),
               connectedPeers: connectedPeerCount,
               peers: peers,
               diagnostics: diagnostics,
+              transmitMode: transmitMode,
+              isVoiceActivationArmed: isVoiceActivationArmed,
             ),
           );
         }
@@ -336,10 +610,19 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             currentState.copyWith(
               isReceivingAudio: isReceivingAudio,
               connectedPeers: connectedPeerCount,
-              statusMessage:
-                  payload['message'] as String? ?? currentState.statusMessage,
+              statusMessage: _connectedStatusMessage(
+                roomId: currentState.roomId,
+                connectedPeers: connectedPeerCount,
+                isTransmitting: currentState.isTransmitting,
+                isReceivingAudio: isReceivingAudio,
+                transmitMode: transmitMode,
+                isVoiceActivationArmed: isVoiceActivationArmed,
+                fallbackMessage: payload['message'] as String?,
+              ),
               peers: peers,
               diagnostics: diagnostics,
+              transmitMode: transmitMode,
+              isVoiceActivationArmed: isVoiceActivationArmed,
             ),
           );
         }
@@ -349,11 +632,21 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             emit(
               currentState.copyWith(
                 isReceivingAudio: isReceivingAudio,
+                isTransmitting: diagnostics.isTransmitting,
                 connectedPeers: connectedPeerCount,
-                statusMessage:
-                    payload['message'] as String? ?? currentState.statusMessage,
+                statusMessage: _connectedStatusMessage(
+                  roomId: currentState.roomId,
+                  connectedPeers: connectedPeerCount,
+                  isTransmitting: diagnostics.isTransmitting,
+                  isReceivingAudio: isReceivingAudio,
+                  transmitMode: transmitMode,
+                  isVoiceActivationArmed: isVoiceActivationArmed,
+                  fallbackMessage: payload['message'] as String?,
+                ),
                 peers: peers,
                 diagnostics: diagnostics,
+                transmitMode: transmitMode,
+                isVoiceActivationArmed: isVoiceActivationArmed,
               ),
             );
           case CommsSessionOpen currentState:
@@ -363,6 +656,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
                     payload['message'] as String? ?? currentState.statusMessage,
                 peers: peers,
                 diagnostics: diagnostics,
+                transmitMode: transmitMode,
+                isVoiceActivationArmed: isVoiceActivationArmed,
               ),
             );
           default:
@@ -380,6 +675,9 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
               peers: peers,
               diagnostics: diagnostics,
               isMicrophoneMuted: state.isMicrophoneMuted,
+              transmitMode: transmitMode,
+              voiceActivationSensitivity: state.voiceActivationSensitivity,
+              isVoiceActivationArmed: isVoiceActivationArmed,
             ),
           );
         }
@@ -392,6 +690,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
             roomId: roomId,
             diagnostics: diagnostics,
             isMicrophoneMuted: state.isMicrophoneMuted,
+            transmitMode: transmitMode,
+            voiceActivationSensitivity: state.voiceActivationSensitivity,
           ),
         );
     }
@@ -423,10 +723,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
         .toList(growable: false);
   }
 
-  int _connectedPeerCount(
-    Map<String, dynamic> payload,
-    List<CommsPeer> peers,
-  ) {
+  int _connectedPeerCount(Map<String, dynamic> payload, List<CommsPeer> peers) {
     return payload['connectedPeers'] as int? ??
         peers.where((peer) => peer.isConnected).length;
   }
@@ -464,6 +761,10 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
           payload['isTransmitting'] as bool? ?? fallback.isTransmitting,
       isReceivingAudio:
           payload['isReceivingAudio'] as bool? ?? fallback.isReceivingAudio,
+      isVoiceActivationArmed:
+          payload['isVoiceActivationArmed'] as bool? ??
+          fallback.isVoiceActivationArmed,
+      transmitMode: _transmitModeFromPayload(payload, fallback.transmitMode),
     );
   }
 
@@ -474,6 +775,8 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
     required bool isDiscovering,
     required bool isTransmitting,
     required bool isReceivingAudio,
+    required bool isVoiceActivationArmed,
+    required CommsTransmitMode transmitMode,
   }) {
     final recentEvents = <CommsDiagnosticEntry>[
       entry,
@@ -487,8 +790,63 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
       isDiscovering: isDiscovering,
       isTransmitting: isTransmitting,
       isReceivingAudio: isReceivingAudio,
+      isVoiceActivationArmed: isVoiceActivationArmed,
+      transmitMode: transmitMode,
       recentEvents: recentEvents,
     );
+  }
+
+  String _connectedStatusMessage({
+    required String roomId,
+    required int connectedPeers,
+    required bool isTransmitting,
+    required bool isReceivingAudio,
+    required CommsTransmitMode transmitMode,
+    required bool isVoiceActivationArmed,
+    String? fallbackMessage,
+  }) {
+    if (isTransmitting && isReceivingAudio) {
+      return 'Duplex audio is active with $connectedPeers peer(s) in room "$roomId".';
+    }
+    if (isTransmitting) {
+      return 'Transmitting to $connectedPeers peer(s) in room "$roomId".';
+    }
+    if (isReceivingAudio) {
+      return 'Receiving voice audio from room "$roomId".';
+    }
+    if (transmitMode == CommsTransmitMode.voiceActivated &&
+        isVoiceActivationArmed) {
+      return 'Voice activation is armed for room "$roomId".';
+    }
+    return fallbackMessage ?? 'Connected over Nearby Connections.';
+  }
+
+  CommsTransmitMode _transmitModeFromPayload(
+    Map<String, dynamic> payload,
+    CommsTransmitMode fallback,
+  ) {
+    return switch (payload['transmitMode']) {
+      'voice_activated' => CommsTransmitMode.voiceActivated,
+      'push_to_talk' => CommsTransmitMode.pushToTalk,
+      _ => fallback,
+    };
+  }
+
+  bool _voiceActivationArmedFromPayload(
+    Map<String, dynamic> payload, {
+    required bool fallback,
+  }) {
+    return payload['isVoiceActivationArmed'] as bool? ?? fallback;
+  }
+
+  String _voiceSensitivityLabel(double sensitivity) {
+    if (sensitivity >= 0.72) {
+      return 'High';
+    }
+    if (sensitivity >= 0.42) {
+      return 'Medium';
+    }
+    return 'Low';
   }
 
   @override

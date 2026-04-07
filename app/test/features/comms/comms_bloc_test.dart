@@ -17,6 +17,15 @@ void main() {
     when(
       () => transportService.setPushToTalkActive(any()),
     ).thenAnswer((_) async {});
+    when(
+      () => transportService.setMicrophoneMuted(any()),
+    ).thenAnswer((_) async {});
+    when(
+      () => transportService.configureVoiceActivation(
+        isEnabled: any(named: 'isEnabled'),
+        sensitivity: any(named: 'sensitivity'),
+      ),
+    ).thenAnswer((_) async {});
     when(() => transportService.events).thenAnswer((_) => const Stream.empty());
   });
 
@@ -153,6 +162,43 @@ void main() {
   );
 
   blocTest<CommsBloc, CommsState>(
+    'switches to voice activation and arms it when connected',
+    build: () => CommsBloc(transportService: transportService),
+    act: (bloc) async {
+      bloc.add(
+        const TransportStatusChanged({
+          'event': 'connected',
+          'roomId': 'gym-floor',
+          'connectedPeers': 1,
+          'message': 'Connected over Nearby Connections.',
+        }),
+      );
+      bloc.add(const TransmitModeChanged(CommsTransmitMode.voiceActivated));
+    },
+    expect: () => [
+      isA<CommsConnected>()
+          .having((state) => state.transmitMode, 'transmitMode', CommsTransmitMode.pushToTalk),
+      isA<CommsConnected>()
+          .having((state) => state.transmitMode, 'transmitMode', CommsTransmitMode.voiceActivated)
+          .having((state) => state.isVoiceActivationArmed, 'isVoiceActivationArmed', true)
+          .having(
+            (state) => state.statusMessage,
+            'statusMessage',
+            'Voice activation is armed for room "gym-floor".',
+          ),
+    ],
+    verify: (_) {
+      verify(() => transportService.setPushToTalkActive(false)).called(1);
+      verify(
+        () => transportService.configureVoiceActivation(
+          isEnabled: true,
+          sensitivity: 0.55,
+        ),
+      ).called(1);
+    },
+  );
+
+  blocTest<CommsBloc, CommsState>(
     'tracks incoming audio activity while connected',
     build: () => CommsBloc(transportService: transportService),
     act: (bloc) async {
@@ -199,6 +245,54 @@ void main() {
   );
 
   blocTest<CommsBloc, CommsState>(
+    'preserves simultaneous transmit and receive state while connected',
+    build: () => CommsBloc(transportService: transportService),
+    act: (bloc) async {
+      bloc.add(
+        const TransportStatusChanged({
+          'event': 'connected',
+          'roomId': 'gym-floor',
+          'connectedPeers': 2,
+          'message': 'Connected over Nearby Connections.',
+        }),
+      );
+      bloc.add(const PushToTalkChanged(true));
+      bloc.add(
+        const TransportStatusChanged({
+          'event': 'receive_state',
+          'roomId': 'gym-floor',
+          'connectedPeers': 2,
+          'message': 'Nearby peer is speaking.',
+          'isReceivingAudio': true,
+        }),
+      );
+    },
+    expect: () => [
+      isA<CommsConnected>()
+          .having((state) => state.roomId, 'roomId', 'gym-floor')
+          .having((state) => state.isTransmitting, 'isTransmitting', false)
+          .having((state) => state.isReceivingAudio, 'isReceivingAudio', false),
+      isA<CommsConnected>()
+          .having((state) => state.roomId, 'roomId', 'gym-floor')
+          .having((state) => state.isTransmitting, 'isTransmitting', true)
+          .having((state) => state.isReceivingAudio, 'isReceivingAudio', false),
+      isA<CommsConnected>()
+          .having((state) => state.roomId, 'roomId', 'gym-floor')
+          .having((state) => state.isTransmitting, 'isTransmitting', true)
+          .having((state) => state.isReceivingAudio, 'isReceivingAudio', true)
+          .having(
+            (state) => state.statusMessage,
+            'statusMessage',
+            'Duplex audio is active with 2 peer(s) in room "gym-floor".',
+          )
+          .having((state) => state.isSpeechActive, 'isSpeechActive', true),
+    ],
+    verify: (_) {
+      verify(() => transportService.setPushToTalkActive(true)).called(1);
+    },
+  );
+
+  blocTest<CommsBloc, CommsState>(
     'blocks push-to-talk while microphone is muted',
     build: () => CommsBloc(transportService: transportService),
     act: (bloc) async {
@@ -238,5 +332,42 @@ void main() {
     verify: (_) {
       verifyNever(() => transportService.setPushToTalkActive(true));
     },
+  );
+
+  blocTest<CommsBloc, CommsState>(
+    'updates voice activation transmit state from transport diagnostics',
+    build: () => CommsBloc(transportService: transportService),
+    act: (bloc) async {
+      bloc.add(
+        const TransportStatusChanged({
+          'event': 'connected',
+          'roomId': 'gym-floor',
+          'connectedPeers': 1,
+          'message': 'Connected over Nearby Connections.',
+          'transmitMode': 'voice_activated',
+          'isVoiceActivationArmed': true,
+        }),
+      );
+      bloc.add(
+        const TransportStatusChanged({
+          'event': 'transmit_state',
+          'roomId': 'gym-floor',
+          'connectedPeers': 1,
+          'message': 'Voice activation opened transmit to 1 peer(s).',
+          'transmitMode': 'voice_activated',
+          'isVoiceActivationArmed': true,
+          'isTransmitting': true,
+        }),
+      );
+    },
+    expect: () => [
+      isA<CommsConnected>()
+          .having((state) => state.transmitMode, 'transmitMode', CommsTransmitMode.voiceActivated)
+          .having((state) => state.isVoiceActivationArmed, 'isVoiceActivationArmed', true),
+      isA<CommsConnected>()
+          .having((state) => state.isTransmitting, 'isTransmitting', true)
+          .having((state) => state.transmitMode, 'transmitMode', CommsTransmitMode.voiceActivated)
+          .having((state) => state.isVoiceActivationArmed, 'isVoiceActivationArmed', true),
+    ],
   );
 }

@@ -129,6 +129,9 @@ class CommsForegroundService : Service() {
         val isConnectionServiceActive: Boolean,
     ) {
         fun summaryText(): String {
+            if (isTransmitting && isReceivingAudio) {
+                return "Sending and receiving voice with $connectedPeers peer(s)"
+            }
             if (isTransmitting) {
                 return "Transmitting to $connectedPeers peer(s)"
             }

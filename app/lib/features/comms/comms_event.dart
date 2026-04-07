@@ -1,5 +1,7 @@
 import 'package:equatable/equatable.dart';
 
+import 'comms_state.dart';
+
 abstract class CommsEvent extends Equatable {
   const CommsEvent();
 
@@ -36,6 +38,24 @@ class MicrophoneMuteChanged extends CommsEvent {
 
   @override
   List<Object?> get props => [isMuted];
+}
+
+class TransmitModeChanged extends CommsEvent {
+  const TransmitModeChanged(this.mode);
+
+  final CommsTransmitMode mode;
+
+  @override
+  List<Object?> get props => [mode];
+}
+
+class VoiceActivationSensitivityChanged extends CommsEvent {
+  const VoiceActivationSensitivityChanged(this.sensitivity);
+
+  final double sensitivity;
+
+  @override
+  List<Object?> get props => [sensitivity];
 }
 
 class TransportStatusChanged extends CommsEvent {

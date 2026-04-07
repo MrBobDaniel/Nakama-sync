@@ -35,6 +35,10 @@ class _CommsScreenState extends State<CommsScreen> {
     context.read<CommsBloc>().add(PushToTalkChanged(isActive));
   }
 
+  void _setTransmitMode(CommsTransmitMode mode) {
+    context.read<CommsBloc>().add(TransmitModeChanged(mode));
+  }
+
   void _toggleBroadcast() {
     if (_isMomentaryTalking) {
       return;
@@ -95,7 +99,8 @@ class _CommsScreenState extends State<CommsScreen> {
             ).showSnackBar(SnackBar(content: Text(state.message)));
           }
 
-          if (state is! CommsConnected &&
+          if ((state is! CommsConnected ||
+                  state.transmitMode == CommsTransmitMode.voiceActivated) &&
               (_isTalkLatched || _isMomentaryTalking)) {
             setState(() {
               _isTalkLatched = false;
@@ -120,10 +125,20 @@ class _CommsScreenState extends State<CommsScreen> {
               state is CommsConnected && state.isTransmitting;
           final isReceivingAudio =
               state is CommsConnected && state.isReceivingAudio;
+          final isDuplexActive =
+              state is CommsConnected &&
+              state.isTransmitting &&
+              state.isReceivingAudio;
           final isMicrophoneMuted = state.isMicrophoneMuted;
+          final transmitMode = state.transmitMode;
+          final isVoiceMode =
+              transmitMode == CommsTransmitMode.voiceActivated;
+          final isVoiceActivationArmed = state.isVoiceActivationArmed;
           final isBroadcastActive = _isTalkLatched || _isMomentaryTalking;
           final peers = state.peers;
-          final activeSpeakers = peers.where((peer) => peer.isSpeaking).toList();
+          final activeSpeakers = peers
+              .where((peer) => peer.isSpeaking)
+              .toList();
           final roomId = switch (state) {
             CommsSessionOpen(:final roomId) => roomId,
             CommsConnected(:final roomId) => roomId,
@@ -193,7 +208,9 @@ class _CommsScreenState extends State<CommsScreen> {
                                     :final connectedPeers,
                                     :final statusMessage,
                                   ) =>
-                                    isTransmitting
+                                    isTransmitting && isReceivingAudio
+                                        ? 'Sending and receiving live voice with $connectedPeers peer(s) in room "$roomId".'
+                                        : isTransmitting
                                         ? 'Transmitting to $connectedPeers peer(s) in room "$roomId".'
                                         : isReceivingAudio
                                         ? 'Receiving voice audio from ${activeSpeakers.length} active speaker(s) in room "$roomId".'
@@ -211,6 +228,20 @@ class _CommsScreenState extends State<CommsScreen> {
                           ),
                         ),
                       ),
+                      if (isRoomOpen || isConnected) ...[
+                        const SizedBox(height: 16),
+                        _TransmitModeCard(
+                          mode: transmitMode,
+                          isMicrophoneMuted: isMicrophoneMuted,
+                          sensitivity: state.voiceActivationSensitivity,
+                          onModeChanged: _setTransmitMode,
+                          onSensitivityChanged: (value) {
+                            context.read<CommsBloc>().add(
+                              VoiceActivationSensitivityChanged(value),
+                            );
+                          },
+                        ),
+                      ],
                       const SizedBox(height: 24),
                       FilledButton.icon(
                         onPressed: isRoomOpen || isConnected
@@ -238,9 +269,12 @@ class _CommsScreenState extends State<CommsScreen> {
                       OutlinedButton.icon(
                         onPressed: isRoomOpen || isConnected
                             ? () {
-                                context.read<CommsBloc>().add(
-                                  const PushToTalkChanged(false),
-                                );
+                                if (state.transmitMode ==
+                                    CommsTransmitMode.pushToTalk) {
+                                  context.read<CommsBloc>().add(
+                                    const PushToTalkChanged(false),
+                                  );
+                                }
                                 context.read<CommsBloc>().add(
                                   const DisconnectRequested(),
                                 );
@@ -269,86 +303,30 @@ class _CommsScreenState extends State<CommsScreen> {
                       ],
                       if (isConnected) ...[
                         const SizedBox(height: 20),
-                        GestureDetector(
-                          onTap: isMicrophoneMuted ? null : _toggleBroadcast,
-                          onLongPressStart: isMicrophoneMuted
-                              ? null
-                              : (_) => _startMomentaryBroadcast(),
-                          onLongPressEnd: (_) => _stopMomentaryBroadcast(),
-                          onLongPressCancel: _stopMomentaryBroadcast,
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 160),
-                            height: 140,
-                            decoration: BoxDecoration(
-                              color: isMicrophoneMuted
-                                  ? Colors.grey.shade700
-                                  : isBroadcastActive || isTransmitting
-                                  ? Colors.redAccent
-                                  : isReceivingAudio
-                                  ? Colors.blueAccent
-                                  : Colors.teal,
-                              borderRadius: BorderRadius.circular(24),
-                              boxShadow: [
-                                BoxShadow(
-                                  color:
-                                      ((isBroadcastActive || isTransmitting)
-                                              ? Colors.redAccent
-                                              : isReceivingAudio
-                                              ? Colors.blueAccent
-                                              : Colors.tealAccent)
-                                          .withValues(alpha: 0.28),
-                                  blurRadius: 20,
-                                  spreadRadius: 1,
-                                ),
-                              ],
+                        if (!isVoiceMode)
+                          GestureDetector(
+                            onTap: isMicrophoneMuted ? null : _toggleBroadcast,
+                            onLongPressStart: isMicrophoneMuted
+                                ? null
+                                : (_) => _startMomentaryBroadcast(),
+                            onLongPressEnd: (_) => _stopMomentaryBroadcast(),
+                            onLongPressCancel: _stopMomentaryBroadcast,
+                            child: _BroadcastPanel(
+                              isMicrophoneMuted: isMicrophoneMuted,
+                              isDuplexActive: isDuplexActive,
+                              isBroadcastActive: isBroadcastActive,
+                              isTransmitting: isTransmitting,
+                              isReceivingAudio: isReceivingAudio,
                             ),
-                            child: Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    isMicrophoneMuted
-                                        ? Icons.mic_off
-                                        : isBroadcastActive || isTransmitting
-                                        ? Icons.campaign
-                                        : isReceivingAudio
-                                        ? Icons.volume_up
-                                        : Icons.mic_none,
-                                    size: 40,
-                                    color: Colors.white,
-                                  ),
-                                  const SizedBox(height: 12),
-                                  Text(
-                                    isMicrophoneMuted
-                                        ? 'Microphone Muted'
-                                        : isBroadcastActive || isTransmitting
-                                        ? 'Broadcasting'
-                                        : isReceivingAudio
-                                        ? 'Receiving Audio'
-                                        : 'Broadcast',
-                                    style: const TextStyle(
-                                      fontSize: 22,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    isMicrophoneMuted
-                                        ? 'Unmute to broadcast.'
-                                        : isBroadcastActive
-                                        ? 'Tap to stop. Hold for momentary talk.'
-                                        : 'Tap to latch on. Hold to talk only while pressed.',
-                                    style: TextStyle(
-                                      color: Colors.white.withValues(
-                                        alpha: 0.82,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
+                          )
+                        else
+                          _VoiceActivationPanel(
+                            isMicrophoneMuted: isMicrophoneMuted,
+                            isVoiceActivationArmed: isVoiceActivationArmed,
+                            isTransmitting: isTransmitting,
+                            isReceivingAudio: isReceivingAudio,
+                            isDuplexActive: isDuplexActive,
                           ),
-                        ),
                       ],
                       const SizedBox(height: 24),
                       _DiagnosticsCard(state: state),
@@ -388,6 +366,290 @@ class _CommsScreenState extends State<CommsScreen> {
       CommsFailure() => 'Connection Error',
       _ => 'Ready',
     };
+  }
+}
+
+class _TransmitModeCard extends StatelessWidget {
+  const _TransmitModeCard({
+    required this.mode,
+    required this.isMicrophoneMuted,
+    required this.sensitivity,
+    required this.onModeChanged,
+    required this.onSensitivityChanged,
+  });
+
+  final CommsTransmitMode mode;
+  final bool isMicrophoneMuted;
+  final double sensitivity;
+  final ValueChanged<CommsTransmitMode> onModeChanged;
+  final ValueChanged<double> onSensitivityChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF171717),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Transmit Mode',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 12),
+            SegmentedButton<CommsTransmitMode>(
+              segments: const [
+                ButtonSegment(
+                  value: CommsTransmitMode.pushToTalk,
+                  icon: Icon(Icons.touch_app),
+                  label: Text('Push-to-talk'),
+                ),
+                ButtonSegment(
+                  value: CommsTransmitMode.voiceActivated,
+                  icon: Icon(Icons.graphic_eq),
+                  label: Text('Voice activated'),
+                ),
+              ],
+              selected: {mode},
+              onSelectionChanged: (selection) {
+                onModeChanged(selection.first);
+              },
+            ),
+            const SizedBox(height: 12),
+            Text(
+              mode == CommsTransmitMode.pushToTalk
+                  ? 'Use the broadcast button exactly as before: tap to latch or hold for momentary talk.'
+                  : isMicrophoneMuted
+                  ? 'Voice activation is disabled while the microphone is muted.'
+                  : 'The mic stays armed while connected and opens transmit automatically when speech is detected.',
+              style: TextStyle(color: Colors.white.withValues(alpha: 0.72)),
+            ),
+            if (mode == CommsTransmitMode.voiceActivated) ...[
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  const Text(
+                    'Sensitivity',
+                    style: TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  const Spacer(),
+                  Text(
+                    _sensitivityLabel(sensitivity),
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.7),
+                    ),
+                  ),
+                ],
+              ),
+              Slider(
+                value: sensitivity,
+                min: 0.0,
+                max: 1.0,
+                divisions: 10,
+                onChanged: isMicrophoneMuted ? null : onSensitivityChanged,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String _sensitivityLabel(double value) {
+    if (value >= 0.72) {
+      return 'High';
+    }
+    if (value >= 0.42) {
+      return 'Medium';
+    }
+    return 'Low';
+  }
+}
+
+class _BroadcastPanel extends StatelessWidget {
+  const _BroadcastPanel({
+    required this.isMicrophoneMuted,
+    required this.isDuplexActive,
+    required this.isBroadcastActive,
+    required this.isTransmitting,
+    required this.isReceivingAudio,
+  });
+
+  final bool isMicrophoneMuted;
+  final bool isDuplexActive;
+  final bool isBroadcastActive;
+  final bool isTransmitting;
+  final bool isReceivingAudio;
+
+  @override
+  Widget build(BuildContext context) {
+    final panelColor = isMicrophoneMuted
+        ? Colors.grey.shade700
+        : isDuplexActive
+        ? Colors.deepPurpleAccent
+        : isBroadcastActive || isTransmitting
+        ? Colors.redAccent
+        : isReceivingAudio
+        ? Colors.blueAccent
+        : Colors.teal;
+    final glowColor = isDuplexActive
+        ? Colors.deepPurpleAccent
+        : (isBroadcastActive || isTransmitting)
+        ? Colors.redAccent
+        : isReceivingAudio
+        ? Colors.blueAccent
+        : Colors.tealAccent;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 160),
+      height: 140,
+      decoration: BoxDecoration(
+        color: panelColor,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: glowColor.withValues(alpha: 0.28),
+            blurRadius: 20,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              isMicrophoneMuted
+                  ? Icons.mic_off
+                  : isDuplexActive
+                  ? Icons.sync
+                  : isBroadcastActive || isTransmitting
+                  ? Icons.campaign
+                  : isReceivingAudio
+                  ? Icons.volume_up
+                  : Icons.mic_none,
+              size: 40,
+              color: Colors.white,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              isMicrophoneMuted
+                  ? 'Microphone Muted'
+                  : isDuplexActive
+                  ? 'Duplex Active'
+                  : isBroadcastActive || isTransmitting
+                  ? 'Broadcasting'
+                  : isReceivingAudio
+                  ? 'Receiving Audio'
+                  : 'Broadcast',
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              isMicrophoneMuted
+                  ? 'Unmute to broadcast.'
+                  : isDuplexActive
+                  ? 'Mic and speaker are both live.'
+                  : isBroadcastActive
+                  ? 'Tap to stop. Hold for momentary talk.'
+                  : 'Tap to latch on. Hold to talk only while pressed.',
+              style: TextStyle(color: Colors.white.withValues(alpha: 0.82)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _VoiceActivationPanel extends StatelessWidget {
+  const _VoiceActivationPanel({
+    required this.isMicrophoneMuted,
+    required this.isVoiceActivationArmed,
+    required this.isTransmitting,
+    required this.isReceivingAudio,
+    required this.isDuplexActive,
+  });
+
+  final bool isMicrophoneMuted;
+  final bool isVoiceActivationArmed;
+  final bool isTransmitting;
+  final bool isReceivingAudio;
+  final bool isDuplexActive;
+
+  @override
+  Widget build(BuildContext context) {
+    final panelColor = isMicrophoneMuted
+        ? Colors.grey.shade700
+        : isDuplexActive
+        ? Colors.deepPurpleAccent
+        : isTransmitting
+        ? Colors.redAccent
+        : isReceivingAudio
+        ? Colors.blueAccent
+        : isVoiceActivationArmed
+        ? Colors.orangeAccent
+        : Colors.grey.shade800;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 160),
+      height: 140,
+      decoration: BoxDecoration(
+        color: panelColor,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: panelColor.withValues(alpha: 0.24),
+            blurRadius: 20,
+            spreadRadius: 1,
+          ),
+        ],
+      ),
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              isMicrophoneMuted
+                  ? Icons.mic_off
+                  : isDuplexActive
+                  ? Icons.sync
+                  : isTransmitting
+                  ? Icons.record_voice_over
+                  : isVoiceActivationArmed
+                  ? Icons.hearing
+                  : Icons.mic_none,
+              size: 40,
+              color: Colors.white,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              isMicrophoneMuted
+                  ? 'Microphone Muted'
+                  : isDuplexActive
+                  ? 'Duplex Active'
+                  : isTransmitting
+                  ? 'Voice TX Active'
+                  : isVoiceActivationArmed
+                  ? 'Voice Activation Armed'
+                  : 'Voice Activation Idle',
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              isMicrophoneMuted
+                  ? 'Unmute to re-arm voice activation.'
+                  : isTransmitting
+                  ? 'Transmit opened automatically from local speech.'
+                  : isVoiceActivationArmed
+                  ? 'Speak naturally to open transmit.'
+                  : 'Waiting for a connected peer before arming the microphone.',
+              style: TextStyle(color: Colors.white.withValues(alpha: 0.82)),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -439,12 +701,20 @@ class _DiagnosticsCard extends StatelessWidget {
                   value: diagnostics.isDiscovering ? 'yes' : 'no',
                 ),
                 _DiagnosticChip(
+                  label: 'mode',
+                  value: diagnostics.transmitMode.diagnosticValue,
+                ),
+                _DiagnosticChip(
                   label: 'tx',
                   value: diagnostics.isTransmitting ? 'active' : 'idle',
                 ),
                 _DiagnosticChip(
                   label: 'rx',
                   value: diagnostics.isReceivingAudio ? 'active' : 'idle',
+                ),
+                _DiagnosticChip(
+                  label: 'voice',
+                  value: diagnostics.isVoiceActivationArmed ? 'armed' : 'off',
                 ),
                 _DiagnosticChip(
                   label: 'mic',
@@ -456,7 +726,8 @@ class _DiagnosticsCard extends StatelessWidget {
                 ),
                 _DiagnosticChip(
                   label: 'speakers',
-                  value: '${state.peers.where((peer) => peer.isSpeaking).length}',
+                  value:
+                      '${state.peers.where((peer) => peer.isSpeaking).length}',
                 ),
               ],
             ),
@@ -479,7 +750,9 @@ class _DiagnosticsCard extends StatelessWidget {
                 diagnostics.lastMessage,
                 style: TextStyle(
                   color: Colors.white.withValues(alpha: 0.82),
-                  fontWeight: isReceivingAudio ? FontWeight.w600 : FontWeight.w400,
+                  fontWeight: isReceivingAudio
+                      ? FontWeight.w600
+                      : FontWeight.w400,
                 ),
               ),
             ),
@@ -487,82 +760,80 @@ class _DiagnosticsCard extends StatelessWidget {
               const SizedBox(height: 12),
               const Divider(height: 1),
               const SizedBox(height: 12),
-              ...diagnostics.recentEvents.map(
-                (entry) {
-                  final isReceiveEvent =
-                      entry.event == 'receive_state' ||
-                      entry.message.toLowerCase().contains('receiving');
-                  final accent = isReceiveEvent
-                      ? Colors.blueAccent
-                      : entry.event == 'transmit_state'
-                      ? Colors.redAccent
-                      : Colors.white;
+              ...diagnostics.recentEvents.map((entry) {
+                final isReceiveEvent =
+                    entry.event == 'receive_state' ||
+                    entry.message.toLowerCase().contains('receiving');
+                final accent = isReceiveEvent
+                    ? Colors.blueAccent
+                    : entry.event == 'transmit_state'
+                    ? Colors.redAccent
+                    : Colors.white;
 
-                  return Container(
-                    width: double.infinity,
-                    margin: const EdgeInsets.only(bottom: 10),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
+                return Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(bottom: 10),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: isReceiveEvent
+                        ? Colors.blueAccent.withValues(alpha: 0.08)
+                        : Colors.white.withValues(alpha: 0.02),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
                       color: isReceiveEvent
-                          ? Colors.blueAccent.withValues(alpha: 0.08)
-                          : Colors.white.withValues(alpha: 0.02),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: isReceiveEvent
-                            ? Colors.blueAccent.withValues(alpha: 0.28)
-                            : Colors.white.withValues(alpha: 0.06),
-                      ),
+                          ? Colors.blueAccent.withValues(alpha: 0.28)
+                          : Colors.white.withValues(alpha: 0.06),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Container(
-                              width: 8,
-                              height: 8,
-                              decoration: BoxDecoration(
-                                color: accent,
-                                shape: BoxShape.circle,
-                              ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: accent,
+                              shape: BoxShape.circle,
                             ),
-                            const SizedBox(width: 8),
-                            Text(
-                              entry.event,
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 0.3,
-                                color: accent.withValues(
-                                  alpha: accent == Colors.white ? 0.9 : 1,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          entry.message,
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: Colors.white.withValues(alpha: 0.76),
                           ),
-                        ),
-                        if (entry.details.isNotEmpty) ...[
-                          const SizedBox(height: 4),
+                          const SizedBox(width: 8),
                           Text(
-                            entry.details.join(' • '),
+                            entry.event,
                             style: TextStyle(
                               fontSize: 12,
-                              color: Colors.white.withValues(alpha: 0.5),
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.3,
+                              color: accent.withValues(
+                                alpha: accent == Colors.white ? 0.9 : 1,
+                              ),
                             ),
                           ),
                         ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        entry.message,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.white.withValues(alpha: 0.76),
+                        ),
+                      ),
+                      if (entry.details.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          entry.details.join(' • '),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.white.withValues(alpha: 0.5),
+                          ),
+                        ),
                       ],
-                    ),
-                  );
-                },
-              ),
+                    ],
+                  ),
+                );
+              }),
             ],
           ],
         ),
@@ -625,22 +896,31 @@ class _AudioActivityBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final Color accent = isReceivingAudio
+    final bool isDuplexActive = isReceivingAudio && isTransmitting;
+    final Color accent = isDuplexActive
+        ? Colors.deepPurpleAccent
+        : isReceivingAudio
         ? Colors.blueAccent
         : isTransmitting
         ? Colors.redAccent
         : Colors.grey;
-    final IconData icon = isReceivingAudio
+    final IconData icon = isDuplexActive
+        ? Icons.sync
+        : isReceivingAudio
         ? Icons.hearing
         : isTransmitting
         ? Icons.campaign
         : Icons.graphic_eq;
-    final String title = isReceivingAudio
+    final String title = isDuplexActive
+        ? 'Duplex Audio Active'
+        : isReceivingAudio
         ? 'Incoming Audio Detected'
         : isTransmitting
         ? 'Broadcast Active'
         : 'Audio Idle';
-    final String subtitle = isReceivingAudio
+    final String subtitle = isDuplexActive
+        ? 'This device is sending microphone audio while receiving live voice in room "$roomId".'
+        : isReceivingAudio
         ? 'Receiving live voice in room "$roomId" from $connectedPeers peer(s).'
         : isTransmitting
         ? 'This device is currently sending microphone audio.'
@@ -651,10 +931,7 @@ class _AudioActivityBanner extends StatelessWidget {
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         gradient: LinearGradient(
-          colors: [
-            accent.withValues(alpha: 0.24),
-            const Color(0xFF1A1A1A),
-          ],
+          colors: [accent.withValues(alpha: 0.24), const Color(0xFF1A1A1A)],
           begin: Alignment.centerLeft,
           end: Alignment.centerRight,
         ),
@@ -702,7 +979,7 @@ class _AudioActivityBanner extends StatelessWidget {
               _SignalPill(
                 color: accent,
                 label: isReceivingAudio
-                    ? 'LIVE RX'
+                    ? (isTransmitting ? 'LIVE TX/RX' : 'LIVE RX')
                     : isTransmitting
                     ? 'LIVE TX'
                     : 'IDLE',
@@ -779,9 +1056,7 @@ class _PeerListCard extends StatelessWidget {
                         children: [
                           Text(
                             peer.displayName,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w700,
-                            ),
+                            style: const TextStyle(fontWeight: FontWeight.w700),
                           ),
                           const SizedBox(height: 2),
                           Text(

@@ -90,6 +90,9 @@ class NearbyConnectionsBridge(
     private var isDiscoveryStartInFlight = false
     private var discoveryStopRunnable: Runnable? = null
     private var isPushToTalkActive = false
+    private var isVoiceActivationEnabled = false
+    private var voiceActivationSensitivity = DEFAULT_VOICE_ACTIVATION_SENSITIVITY
+    private var isMicrophoneMuted = false
 
     init {
         CommsSessionManager.setListener(
@@ -134,6 +137,20 @@ class NearbyConnectionsBridge(
             "setPushToTalkActive" -> {
                 val isActive = call.argument<Boolean>("isActive") ?: false
                 setPushToTalkActive(isActive, result)
+            }
+
+            "configureVoiceActivation" -> {
+                val isEnabled = call.argument<Boolean>("isEnabled") ?: false
+                val sensitivity =
+                    (call.argument<Number>("sensitivity")?.toDouble()
+                        ?: DEFAULT_VOICE_ACTIVATION_SENSITIVITY)
+                        .coerceIn(0.0, 1.0)
+                configureVoiceActivation(isEnabled, sensitivity, result)
+            }
+
+            "setMicrophoneMuted" -> {
+                val isMuted = call.argument<Boolean>("isMuted") ?: false
+                setMicrophoneMuted(isMuted, result)
             }
 
             "stopSession" -> {
@@ -246,6 +263,12 @@ class NearbyConnectionsBridge(
     }
 
     private fun setPushToTalkActive(isActive: Boolean, result: MethodChannel.Result) {
+        if (isActive && isMicrophoneMuted) {
+            emit("error", "Microphone permission is muted on this device.")
+            result.error("microphone_muted", "Microphone is muted on this device.", null)
+            return
+        }
+
         val validatedEndpoints = connectedValidatedEndpointIds()
         if (isActive && validatedEndpoints.isEmpty()) {
             emit("error", "No validated Nearby peers are connected.")
@@ -256,42 +279,109 @@ class NearbyConnectionsBridge(
         isPushToTalkActive = isActive
 
         if (isActive) {
+            isVoiceActivationEnabled = false
             val fanout = outgoingAudioFanout ?: OutgoingAudioFanout(
                 context = context,
                 connectionsClient = connectionsClient,
                 sampleRate = DEFAULT_STREAM_SAMPLE_RATE,
                 communicationAudioController = communicationAudioController,
+                onTransmitStateChanged = { isTransmitting, message ->
+                    emit(
+                        "transmit_state",
+                        message,
+                        mapOf(
+                            "isTransmitting" to isTransmitting,
+                            "audioSampleRate" to DEFAULT_STREAM_SAMPLE_RATE,
+                        ),
+                    )
+                },
+                onVoiceActivationArmedChanged = { isArmed ->
+                    emit(
+                        "voice_activation_state",
+                        if (isArmed) {
+                            "Voice activation is armed."
+                        } else {
+                            "Voice activation is idle."
+                        },
+                        mapOf("isVoiceActivationArmed" to isArmed),
+                    )
+                },
                 onError = { message ->
                     emit("error", message)
                 },
             ).also { createdFanout ->
                 outgoingAudioFanout = createdFanout
-                createdFanout.start()
+                createdFanout.startManual(validatedEndpoints)
             }
 
             fanout.syncEndpoints(validatedEndpoints)
-            emit(
-                "transmit_state",
-                "Streaming microphone audio to ${validatedEndpoints.size} peer(s).",
-                mapOf(
-                    "isTransmitting" to true,
-                    "audioSampleRate" to DEFAULT_STREAM_SAMPLE_RATE,
-                ),
-            )
         } else {
             connectedValidatedEndpointIds().forEach { endpointId ->
                 sendAudioControl(endpointId, "audio_stop")
             }
             outgoingAudioFanout?.stop()
             outgoingAudioFanout = null
-            emit("transmit_state", "Push-to-talk stream is idle.", mapOf("isTransmitting" to false))
         }
 
         result.success(null)
     }
 
+    private fun configureVoiceActivation(
+        isEnabled: Boolean,
+        sensitivity: Double,
+        result: MethodChannel.Result,
+    ) {
+        isVoiceActivationEnabled = isEnabled
+        voiceActivationSensitivity = sensitivity
+        isPushToTalkActive = false
+
+        syncVoiceActivation()
+        emit(
+            "voice_activation_state",
+            if (isEnabled) {
+                "Voice activation configured."
+            } else {
+                "Voice activation disabled."
+            },
+            mapOf(
+                "isVoiceActivationArmed" to (outgoingAudioFanout?.isVoiceActivationArmed() == true),
+            ),
+        )
+        result.success(null)
+    }
+
+    private fun setMicrophoneMuted(
+        isMuted: Boolean,
+        result: MethodChannel.Result,
+    ) {
+        isMicrophoneMuted = isMuted
+        if (isMuted) {
+            isPushToTalkActive = false
+            outgoingAudioFanout?.stop()
+            outgoingAudioFanout = null
+            connectedValidatedEndpointIds().forEach { endpointId ->
+                sendAudioControl(endpointId, "audio_stop")
+            }
+        } else {
+            syncVoiceActivation()
+        }
+
+        emit(
+            "microphone_state",
+            if (isMuted) {
+                "Microphone muted on this device."
+            } else {
+                "Microphone unmuted on this device."
+            },
+            mapOf("isVoiceActivationArmed" to false),
+        )
+        result.success(null)
+    }
+
     private fun stopSession() {
         isPushToTalkActive = false
+        isVoiceActivationEnabled = false
+        isMicrophoneMuted = false
         outgoingAudioFanout?.stop()
         outgoingAudioFanout = null
         incomingAudioMixer.stopAll()
@@ -348,6 +438,8 @@ class NearbyConnectionsBridge(
             "isDiscovering" to isDiscovering,
             "isReceivingAudio" to peerSessions.values.any { it.isSpeaking && it.isConnected },
             "isTransmitting" to (outgoingAudioFanout?.isRunning() == true),
+            "transmitMode" to if (isVoiceActivationEnabled) "voice_activated" else "push_to_talk",
+            "isVoiceActivationArmed" to (outgoingAudioFanout?.isVoiceActivationArmed() == true),
             "peers" to peerSessions.values
                 .sortedWith(compareBy<PeerSession>({ !it.isConnected }, { it.displayName.lowercase() }))
                 .map { peer ->
@@ -431,6 +523,68 @@ class NearbyConnectionsBridge(
         return activeEndpoints.filterTo(linkedSetOf()) { endpointRoomMatches[it] == true }
     }
 
+    private fun syncVoiceActivation() {
+        if (!isVoiceActivationEnabled || isMicrophoneMuted) {
+            outgoingAudioFanout?.stop()
+            outgoingAudioFanout = null
+            return
+        }
+
+        val validatedEndpoints = connectedValidatedEndpointIds()
+        if (validatedEndpoints.isEmpty()) {
+            outgoingAudioFanout?.stop()
+            outgoingAudioFanout = null
+            return
+        }
+
+        val fanout = outgoingAudioFanout ?: OutgoingAudioFanout(
+            context = context,
+            connectionsClient = connectionsClient,
+            sampleRate = DEFAULT_STREAM_SAMPLE_RATE,
+            communicationAudioController = communicationAudioController,
+            onTransmitStateChanged = { isTransmitting, message ->
+                emit(
+                    "transmit_state",
+                    message,
+                    mapOf(
+                        "isTransmitting" to isTransmitting,
+                        "audioSampleRate" to DEFAULT_STREAM_SAMPLE_RATE,
+                    ),
+                )
+                if (!isTransmitting) {
+                    connectedValidatedEndpointIds().forEach { endpointId ->
+                        sendAudioControl(endpointId, "audio_stop")
+                    }
+                }
+            },
+            onVoiceActivationArmedChanged = { isArmed ->
+                emit(
+                    "voice_activation_state",
+                    if (isArmed) {
+                        "Voice activation is armed."
+                    } else {
+                        "Voice activation is idle."
+                    },
+                    mapOf("isVoiceActivationArmed" to isArmed),
+                )
+            },
+            onError = { message ->
+                emit("error", message)
+            },
+        ).also {
+            outgoingAudioFanout = it
+            it.startVoiceActivated(
+                sensitivity = voiceActivationSensitivity,
+                initialEndpoints = validatedEndpoints,
+            )
+        }
+
+        fanout.updateVoiceActivation(
+            sensitivity = voiceActivationSensitivity,
+            endpointIds = validatedEndpoints,
+        )
+    }
+
     private val endpointDiscoveryCallback = object : EndpointDiscoveryCallback() {
         override fun onEndpointFound(endpointId: String, info: DiscoveredEndpointInfo) {
             if (!discoveredEndpoints.add(endpointId)) {
@@ -465,8 +619,8 @@ class NearbyConnectionsBridge(
             if (isPushToTalkActive && connectedValidatedEndpointIds().isEmpty()) {
                 outgoingAudioFanout?.stop()
                 outgoingAudioFanout = null
-                emit("transmit_state", "Push-to-talk stream is idle.", mapOf("isTransmitting" to false))
             }
+            syncVoiceActivation()
             startDiscoveryBurst("Peer left range. Scanning briefly for reconnects.")
         }
     }
@@ -509,6 +663,9 @@ class NearbyConnectionsBridge(
                     if (isPushToTalkActive) {
                         outgoingAudioFanout?.addEndpoint(endpointId)
                     }
+                    if (isVoiceActivationEnabled) {
+                        syncVoiceActivation()
+                    }
                     emit("connected", "Connected to $remoteName over Nearby Connections.")
                 }
 
@@ -537,8 +694,8 @@ class NearbyConnectionsBridge(
             if (isPushToTalkActive && connectedValidatedEndpointIds().isEmpty()) {
                 outgoingAudioFanout?.stop()
                 outgoingAudioFanout = null
-                emit("transmit_state", "Push-to-talk stream is idle.", mapOf("isTransmitting" to false))
             }
+            syncVoiceActivation()
             startDiscoveryBurst("Peer disconnected. Scanning briefly for another nearby peer.")
         }
     }
@@ -1088,18 +1245,70 @@ class NearbyConnectionsBridge(
         private val connectionsClient: ConnectionsClient,
         private val sampleRate: Int,
         private val communicationAudioController: CommunicationAudioController,
+        private val onTransmitStateChanged: (Boolean, String) -> Unit,
+        private val onVoiceActivationArmedChanged: (Boolean) -> Unit,
         private val onError: (String) -> Unit,
     ) {
         private val isRunning = AtomicBoolean(false)
-        private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
         private val captureExecutor = Executors.newSingleThreadExecutor()
+        private val lock = Any()
         private val endpointOutputs = ConcurrentHashMap<String, OutputStream>()
+        private val endpointIds = linkedSetOf<String>()
+        private val preRollFrames = ArrayDeque<ByteArray>()
+        private val voiceActivationProcessor = VoiceActivationProcessor(
+            frameMillis = STREAM_CHUNK_MILLIS,
+            sensitivity = DEFAULT_VOICE_ACTIVATION_SENSITIVITY,
+        )
         private var audioRecord: AudioRecord? = null
         private var noiseSuppressor: NoiseSuppressor? = null
         private var acousticEchoCanceler: AcousticEchoCanceler? = null
         private var automaticGainControl: AutomaticGainControl? = null
+        private var captureMode = CaptureMode.MANUAL
+        private var isCurrentlyTransmitting = false
+        private var isVoiceActivationArmed = false
 
-        fun start() {
+        fun startManual(initialEndpoints: Set<String>) {
+            captureMode = CaptureMode.MANUAL
+            synchronized(lock) {
+                endpointIds.clear()
+                endpointIds.addAll(initialEndpoints)
+            }
+            startCaptureIfNeeded()
+        }
+
+        fun startVoiceActivated(
+            sensitivity: Double,
+            initialEndpoints: Set<String>,
+        ) {
+            captureMode = CaptureMode.VOICE_ACTIVATED
+            voiceActivationProcessor.updateSensitivity(sensitivity)
+            synchronized(lock) {
+                endpointIds.clear()
+                endpointIds.addAll(initialEndpoints)
+            }
+            startCaptureIfNeeded()
+            setVoiceActivationArmed(initialEndpoints.isNotEmpty())
+        }
+
+        fun updateVoiceActivation(
+            sensitivity: Double,
+            endpointIds: Set<String>,
+        ) {
+            voiceActivationProcessor.updateSensitivity(sensitivity)
+            synchronized(lock) {
+                this.endpointIds.clear()
+                this.endpointIds.addAll(endpointIds)
+            }
+            syncEndpoints(endpointIds)
+            setVoiceActivationArmed(captureMode == CaptureMode.VOICE_ACTIVATED && endpointIds.isNotEmpty())
+            if (endpointIds.isEmpty()) {
+                stopTransmittingInternal(notify = true)
+            }
+        }
+
+        fun isVoiceActivationArmed(): Boolean = isVoiceActivationArmed
+
+        private fun startCaptureIfNeeded() {
             if (!isRunning.compareAndSet(false, true)) {
                 return
             }
@@ -1132,10 +1341,16 @@ class NearbyConnectionsBridge(
                 val buffer = ByteArray(frameBytes)
                 try {
                     record.startRecording()
+                    if (captureMode == CaptureMode.MANUAL) {
+                        setTransmitting(
+                            isTransmitting = true,
+                            message = "Streaming microphone audio to ${endpointIdsSnapshot().size} peer(s).",
+                        )
+                    }
                     while (isRunning.get()) {
                         val readCount = record.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
                         if (readCount > 0) {
-                            broadcastFrame(buffer.copyOf(readCount))
+                            handleCapturedFrame(buffer.copyOf(readCount))
                         }
                     }
                 } catch (error: Exception) {
@@ -1147,10 +1362,21 @@ class NearbyConnectionsBridge(
         }
 
         fun syncEndpoints(endpointIds: Set<String>) {
+            synchronized(lock) {
+                this.endpointIds.clear()
+                this.endpointIds.addAll(endpointIds)
+            }
             endpointOutputs.keys.toList()
                 .filterNot(endpointIds::contains)
                 .forEach(::removeEndpoint)
-            endpointIds.forEach(::addEndpoint)
+            if (captureMode == CaptureMode.MANUAL || isCurrentlyTransmitting) {
+                endpointIds.forEach { endpointId ->
+                    addEndpoint(endpointId)
+                    if (captureMode == CaptureMode.VOICE_ACTIVATED && isCurrentlyTransmitting) {
+                        replayPreRoll(endpointId)
+                    }
+                }
+            }
         }
 
         fun addEndpoint(endpointId: String) {
@@ -1175,6 +1401,8 @@ class NearbyConnectionsBridge(
         }
 
         fun stop() {
+            setVoiceActivationArmed(false)
+            stopTransmittingInternal(notify = true)
             if (!isRunning.compareAndSet(true, false)) {
                 endpointOutputs.keys.toList().forEach(::removeEndpoint)
                 return
@@ -1193,11 +1421,42 @@ class NearbyConnectionsBridge(
             automaticGainControl = null
             audioRecord?.release()
             audioRecord = null
-            captureExecutor.shutdownNow()
             communicationAudioController.releaseCapture()
         }
 
         fun isRunning(): Boolean = isRunning.get()
+
+        private fun handleCapturedFrame(frame: ByteArray) {
+            if (captureMode == CaptureMode.MANUAL) {
+                if (endpointOutputs.isEmpty()) {
+                    syncEndpoints(endpointIdsSnapshot())
+                }
+                broadcastFrame(frame)
+                return
+            }
+
+            pushPreRollFrame(frame)
+            val decision = voiceActivationProcessor.process(frame)
+            if (decision.shouldStartTransmitting && !isCurrentlyTransmitting) {
+                val endpoints = endpointIdsSnapshot()
+                if (endpoints.isNotEmpty()) {
+                    syncEndpoints(endpoints)
+                    preRollFrames.forEach(::broadcastFrame)
+                    setTransmitting(
+                        isTransmitting = true,
+                        message = "Voice activation opened transmit to ${endpoints.size} peer(s).",
+                    )
+                }
+            }
+
+            if (isCurrentlyTransmitting) {
+                broadcastFrame(frame)
+            }
+
+            if (decision.shouldStopTransmitting && isCurrentlyTransmitting) {
+                stopTransmittingInternal(notify = true)
+            }
+        }
 
         private fun broadcastFrame(frame: ByteArray) {
             endpointOutputs.entries.toList().forEach { (endpointId, stream) ->
@@ -1212,6 +1471,66 @@ class NearbyConnectionsBridge(
 
         private fun frameBytes(): Int {
             return sampleRate * PCM_BYTES_PER_SAMPLE * STREAM_CHUNK_MILLIS / 1_000
+        }
+
+        private fun endpointIdsSnapshot(): Set<String> {
+            synchronized(lock) {
+                return endpointIds.toSet()
+            }
+        }
+
+        private fun pushPreRollFrame(frame: ByteArray) {
+            synchronized(lock) {
+                preRollFrames.addLast(frame)
+                while (preRollFrames.size > VOICE_PRE_ROLL_FRAMES) {
+                    preRollFrames.removeFirst()
+                }
+            }
+        }
+
+        private fun replayPreRoll(endpointId: String) {
+            val stream = endpointOutputs[endpointId] ?: return
+            val frames = synchronized(lock) { preRollFrames.toList() }
+            frames.forEach { frame ->
+                try {
+                    stream.write(frame)
+                    stream.flush()
+                } catch (_: Exception) {
+                    removeEndpoint(endpointId)
+                    return
+                }
+            }
+        }
+
+        private fun setVoiceActivationArmed(isArmed: Boolean) {
+            if (isVoiceActivationArmed == isArmed) {
+                return
+            }
+            isVoiceActivationArmed = isArmed
+            onVoiceActivationArmedChanged(isArmed)
+        }
+
+        private fun setTransmitting(
+            isTransmitting: Boolean,
+            message: String,
+        ) {
+            if (isCurrentlyTransmitting == isTransmitting) {
+                return
+            }
+            isCurrentlyTransmitting = isTransmitting
+            onTransmitStateChanged(isTransmitting, message)
+        }
+
+        private fun stopTransmittingInternal(notify: Boolean) {
+            if (captureMode == CaptureMode.VOICE_ACTIVATED) {
+                voiceActivationProcessor.resetSpeechState()
+            }
+            endpointOutputs.keys.toList().forEach(::removeEndpoint)
+            if (notify && isCurrentlyTransmitting) {
+                setTransmitting(false, "Transmit is idle.")
+            } else {
+                isCurrentlyTransmitting = false
+            }
         }
 
         private fun attachVoiceEffects(audioSessionId: Int) {
@@ -1239,7 +1558,102 @@ class NearbyConnectionsBridge(
                 MediaRecorder.AudioSource.VOICE_COMMUNICATION
             }
         }
+
+        private enum class CaptureMode {
+            MANUAL,
+            VOICE_ACTIVATED,
+        }
     }
+
+    private class VoiceActivationProcessor(
+        private val frameMillis: Int,
+        sensitivity: Double,
+    ) {
+        private var dynamicFloor = 0.008
+        private var attackFrames = 0
+        private var releaseFrames = 0
+        private var isSpeechActive = false
+        private var sensitivity = sensitivity
+
+        fun updateSensitivity(sensitivity: Double) {
+            this.sensitivity = sensitivity.coerceIn(0.0, 1.0)
+        }
+
+        fun resetSpeechState() {
+            attackFrames = 0
+            releaseFrames = 0
+            isSpeechActive = false
+        }
+
+        fun process(frame: ByteArray): VoiceActivationDecision {
+            val rms = frameRms(frame)
+            val attackBoost = 0.02 - (sensitivity * 0.012)
+            val releaseBoost = attackBoost * 0.55
+            val startThreshold = max(dynamicFloor * 2.1, dynamicFloor + attackBoost)
+            val stopThreshold = max(dynamicFloor * 1.45, dynamicFloor + releaseBoost)
+
+            if (!isSpeechActive || rms < stopThreshold) {
+                dynamicFloor = (dynamicFloor * 0.985) + (rms * 0.015)
+            } else {
+                dynamicFloor = (dynamicFloor * 0.998) + (rms * 0.002)
+            }
+
+            var shouldStart = false
+            var shouldStop = false
+            if (!isSpeechActive) {
+                if (rms >= startThreshold) {
+                    attackFrames += 1
+                    if (attackFrames >= VOICE_ATTACK_FRAMES) {
+                        attackFrames = 0
+                        releaseFrames = 0
+                        isSpeechActive = true
+                        shouldStart = true
+                    }
+                } else {
+                    attackFrames = 0
+                }
+            } else {
+                if (rms < stopThreshold) {
+                    releaseFrames += 1
+                    if (releaseFrames * frameMillis >= VOICE_RELEASE_HANGOVER_MILLIS) {
+                        releaseFrames = 0
+                        attackFrames = 0
+                        isSpeechActive = false
+                        shouldStop = true
+                    }
+                } else {
+                    releaseFrames = 0
+                }
+            }
+
+            return VoiceActivationDecision(
+                shouldStartTransmitting = shouldStart,
+                shouldStopTransmitting = shouldStop,
+            )
+        }
+
+        private fun frameRms(frame: ByteArray): Double {
+            var sumSquares = 0.0
+            var sampleCount = 0
+            var index = 0
+            while (index + 1 < frame.size) {
+                val sample = ((frame[index].toInt() and 0xFF) or (frame[index + 1].toInt() shl 8)).toShort()
+                val normalized = sample / 32768.0
+                sumSquares += normalized * normalized
+                sampleCount += 1
+                index += PCM_BYTES_PER_SAMPLE
+            }
+            if (sampleCount == 0) {
+                return 0.0
+            }
+            return kotlin.math.sqrt(sumSquares / sampleCount.toDouble())
+        }
+    }
+
+    private data class VoiceActivationDecision(
+        val shouldStartTransmitting: Boolean,
+        val shouldStopTransmitting: Boolean,
+    )
 
     private class CommunicationAudioController(
         context: Context,
@@ -1370,6 +1784,10 @@ class NearbyConnectionsBridge(
         private const val PCM_BYTES_PER_SAMPLE = 2
         private const val STREAM_CHUNK_MILLIS = 20
         private const val DEFAULT_BUFFER_CHUNKS = 4
+        private const val VOICE_PRE_ROLL_FRAMES = 10
+        private const val VOICE_ATTACK_FRAMES = 3
+        private const val VOICE_RELEASE_HANGOVER_MILLIS = 700
+        private const val DEFAULT_VOICE_ACTIVATION_SENSITIVITY = 0.55
         private const val DISCOVERY_WINDOW_MILLIS = 15_000L
         private const val CONNECTION_REQUEST_DELAY_MILLIS = 250L
         private const val CONNECTION_RETRY_DELAY_MILLIS = 2_000L

@@ -1,5 +1,15 @@
 import 'package:equatable/equatable.dart';
 
+enum CommsTransmitMode {
+  pushToTalk,
+  voiceActivated;
+
+  String get diagnosticValue => switch (this) {
+    CommsTransmitMode.pushToTalk => 'push_to_talk',
+    CommsTransmitMode.voiceActivated => 'voice_activated',
+  };
+}
+
 class CommsPeer extends Equatable {
   const CommsPeer({
     required this.peerId,
@@ -64,6 +74,8 @@ class CommsDiagnostics extends Equatable {
     this.isDiscovering = false,
     this.isTransmitting = false,
     this.isReceivingAudio = false,
+    this.isVoiceActivationArmed = false,
+    this.transmitMode = CommsTransmitMode.pushToTalk,
     this.recentEvents = const <CommsDiagnosticEntry>[],
   });
 
@@ -73,6 +85,8 @@ class CommsDiagnostics extends Equatable {
   final bool isDiscovering;
   final bool isTransmitting;
   final bool isReceivingAudio;
+  final bool isVoiceActivationArmed;
+  final CommsTransmitMode transmitMode;
   final List<CommsDiagnosticEntry> recentEvents;
 
   CommsDiagnostics copyWith({
@@ -82,6 +96,8 @@ class CommsDiagnostics extends Equatable {
     bool? isDiscovering,
     bool? isTransmitting,
     bool? isReceivingAudio,
+    bool? isVoiceActivationArmed,
+    CommsTransmitMode? transmitMode,
     List<CommsDiagnosticEntry>? recentEvents,
   }) {
     return CommsDiagnostics(
@@ -91,6 +107,9 @@ class CommsDiagnostics extends Equatable {
       isDiscovering: isDiscovering ?? this.isDiscovering,
       isTransmitting: isTransmitting ?? this.isTransmitting,
       isReceivingAudio: isReceivingAudio ?? this.isReceivingAudio,
+      isVoiceActivationArmed:
+          isVoiceActivationArmed ?? this.isVoiceActivationArmed,
+      transmitMode: transmitMode ?? this.transmitMode,
       recentEvents: recentEvents ?? this.recentEvents,
     );
   }
@@ -103,6 +122,8 @@ class CommsDiagnostics extends Equatable {
     isDiscovering,
     isTransmitting,
     isReceivingAudio,
+    isVoiceActivationArmed,
+    transmitMode,
     recentEvents,
   ];
 }
@@ -112,6 +133,9 @@ abstract class CommsState extends Equatable {
 
   CommsDiagnostics get diagnostics;
   bool get isMicrophoneMuted;
+  CommsTransmitMode get transmitMode => CommsTransmitMode.pushToTalk;
+  double get voiceActivationSensitivity => 0.55;
+  bool get isVoiceActivationArmed => false;
   List<CommsPeer> get peers => const <CommsPeer>[];
   bool get isSpeechActive => false;
 
@@ -124,6 +148,8 @@ class CommsInitial extends CommsState {
     this.statusMessage = 'Ready to search for nearby peers.',
     this.diagnostics = const CommsDiagnostics(),
     this.isMicrophoneMuted = false,
+    this.transmitMode = CommsTransmitMode.pushToTalk,
+    this.voiceActivationSensitivity = 0.55,
   });
 
   final String statusMessage;
@@ -131,9 +157,19 @@ class CommsInitial extends CommsState {
   final CommsDiagnostics diagnostics;
   @override
   final bool isMicrophoneMuted;
+  @override
+  final CommsTransmitMode transmitMode;
+  @override
+  final double voiceActivationSensitivity;
 
   @override
-  List<Object?> get props => [statusMessage, diagnostics, isMicrophoneMuted];
+  List<Object?> get props => [
+    statusMessage,
+    diagnostics,
+    isMicrophoneMuted,
+    transmitMode,
+    voiceActivationSensitivity,
+  ];
 }
 
 class CommsSessionOpen extends CommsState {
@@ -144,6 +180,9 @@ class CommsSessionOpen extends CommsState {
     this.peers = const <CommsPeer>[],
     this.diagnostics = const CommsDiagnostics(),
     this.isMicrophoneMuted = false,
+    this.transmitMode = CommsTransmitMode.pushToTalk,
+    this.voiceActivationSensitivity = 0.55,
+    this.isVoiceActivationArmed = false,
   });
 
   final String roomId;
@@ -155,6 +194,12 @@ class CommsSessionOpen extends CommsState {
   final CommsDiagnostics diagnostics;
   @override
   final bool isMicrophoneMuted;
+  @override
+  final CommsTransmitMode transmitMode;
+  @override
+  final double voiceActivationSensitivity;
+  @override
+  final bool isVoiceActivationArmed;
 
   CommsSessionOpen copyWith({
     String? roomId,
@@ -163,6 +208,9 @@ class CommsSessionOpen extends CommsState {
     List<CommsPeer>? peers,
     CommsDiagnostics? diagnostics,
     bool? isMicrophoneMuted,
+    CommsTransmitMode? transmitMode,
+    double? voiceActivationSensitivity,
+    bool? isVoiceActivationArmed,
   }) {
     return CommsSessionOpen(
       roomId ?? this.roomId,
@@ -171,6 +219,11 @@ class CommsSessionOpen extends CommsState {
       peers: peers ?? this.peers,
       diagnostics: diagnostics ?? this.diagnostics,
       isMicrophoneMuted: isMicrophoneMuted ?? this.isMicrophoneMuted,
+      transmitMode: transmitMode ?? this.transmitMode,
+      voiceActivationSensitivity:
+          voiceActivationSensitivity ?? this.voiceActivationSensitivity,
+      isVoiceActivationArmed:
+          isVoiceActivationArmed ?? this.isVoiceActivationArmed,
     );
   }
 
@@ -182,6 +235,9 @@ class CommsSessionOpen extends CommsState {
     peers,
     diagnostics,
     isMicrophoneMuted,
+    transmitMode,
+    voiceActivationSensitivity,
+    isVoiceActivationArmed,
   ];
 }
 
@@ -195,6 +251,9 @@ class CommsConnected extends CommsState {
     this.peers = const <CommsPeer>[],
     this.diagnostics = const CommsDiagnostics(),
     this.isMicrophoneMuted = false,
+    this.transmitMode = CommsTransmitMode.pushToTalk,
+    this.voiceActivationSensitivity = 0.55,
+    this.isVoiceActivationArmed = false,
   });
 
   final String roomId;
@@ -208,9 +267,17 @@ class CommsConnected extends CommsState {
   final CommsDiagnostics diagnostics;
   @override
   final bool isMicrophoneMuted;
+  @override
+  final CommsTransmitMode transmitMode;
+  @override
+  final double voiceActivationSensitivity;
+  @override
+  final bool isVoiceActivationArmed;
 
   @override
   bool get isSpeechActive => isTransmitting || isReceivingAudio;
+
+  bool get isDuplexActive => isTransmitting && isReceivingAudio;
 
   CommsConnected copyWith({
     String? roomId,
@@ -221,6 +288,9 @@ class CommsConnected extends CommsState {
     List<CommsPeer>? peers,
     CommsDiagnostics? diagnostics,
     bool? isMicrophoneMuted,
+    CommsTransmitMode? transmitMode,
+    double? voiceActivationSensitivity,
+    bool? isVoiceActivationArmed,
   }) {
     return CommsConnected(
       roomId ?? this.roomId,
@@ -231,6 +301,11 @@ class CommsConnected extends CommsState {
       peers: peers ?? this.peers,
       diagnostics: diagnostics ?? this.diagnostics,
       isMicrophoneMuted: isMicrophoneMuted ?? this.isMicrophoneMuted,
+      transmitMode: transmitMode ?? this.transmitMode,
+      voiceActivationSensitivity:
+          voiceActivationSensitivity ?? this.voiceActivationSensitivity,
+      isVoiceActivationArmed:
+          isVoiceActivationArmed ?? this.isVoiceActivationArmed,
     );
   }
 
@@ -244,6 +319,9 @@ class CommsConnected extends CommsState {
     peers,
     diagnostics,
     isMicrophoneMuted,
+    transmitMode,
+    voiceActivationSensitivity,
+    isVoiceActivationArmed,
   ];
 }
 
@@ -253,6 +331,8 @@ class CommsFailure extends CommsState {
     this.roomId,
     this.diagnostics = const CommsDiagnostics(),
     this.isMicrophoneMuted = false,
+    this.transmitMode = CommsTransmitMode.pushToTalk,
+    this.voiceActivationSensitivity = 0.55,
   });
 
   final String message;
@@ -261,7 +341,18 @@ class CommsFailure extends CommsState {
   final CommsDiagnostics diagnostics;
   @override
   final bool isMicrophoneMuted;
+  @override
+  final CommsTransmitMode transmitMode;
+  @override
+  final double voiceActivationSensitivity;
 
   @override
-  List<Object?> get props => [message, roomId, diagnostics, isMicrophoneMuted];
+  List<Object?> get props => [
+    message,
+    roomId,
+    diagnostics,
+    isMicrophoneMuted,
+    transmitMode,
+    voiceActivationSensitivity,
+  ];
 }

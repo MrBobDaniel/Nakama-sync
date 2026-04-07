@@ -41,6 +41,36 @@ class NearbyConnectionsManager {
     }
   }
 
+  static Future<void> configureVoiceActivation({
+    required bool isEnabled,
+    required double sensitivity,
+  }) async {
+    try {
+      await _channel.invokeMethod<void>('configureVoiceActivation', {
+        'isEnabled': isEnabled,
+        'sensitivity': sensitivity,
+      });
+    } on PlatformException catch (error) {
+      debugPrint(
+        "Failed to configure Nearby voice activation: '${error.message}'.",
+      );
+      rethrow;
+    }
+  }
+
+  static Future<void> setMicrophoneMuted(bool isMuted) async {
+    try {
+      await _channel.invokeMethod<void>('setMicrophoneMuted', {
+        'isMuted': isMuted,
+      });
+    } on PlatformException catch (error) {
+      debugPrint(
+        "Failed to update Nearby microphone mute state: '${error.message}'.",
+      );
+      rethrow;
+    }
+  }
+
   static Future<void> stopSession() async {
     try {
       await _channel.invokeMethod<void>('stopSession');

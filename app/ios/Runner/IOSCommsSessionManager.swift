@@ -194,6 +194,9 @@ final class IOSCommsSessionManager: NSObject {
   }
 
   private func audioStatusMessage() -> String {
+    if isTransmitting && isReceivingAudio {
+      return "iOS CallKit session is sending and receiving voice audio."
+    }
     if isTransmitting {
       return "iOS CallKit session is transmitting voice audio."
     }

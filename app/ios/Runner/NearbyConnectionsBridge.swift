@@ -37,6 +37,9 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   private var peerSessions = [EndpointID: PeerSession]()
   private var isDiscovering = false
   private var isPushToTalkActive = false
+  private var isVoiceActivationEnabled = false
+  private var voiceActivationSensitivity = 0.55
+  private var isMicrophoneMuted = false
   private var discoveryStopWorkItem: DispatchWorkItem?
   private lazy var audioController = NearbyAudioController(
     prepareAudioSession: { [weak self] in
@@ -95,6 +98,39 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       }
 
       setPushToTalkActive(isActive, result: result)
+
+    case "configureVoiceActivation":
+      guard
+        let arguments = call.arguments as? [String: Any]
+      else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "Voice activation arguments are required.",
+            details: nil
+          )
+        )
+        return
+      }
+      let isEnabled = arguments["isEnabled"] as? Bool ?? false
+      let sensitivity = min(1.0, max(0.0, arguments["sensitivity"] as? Double ?? 0.55))
+      configureVoiceActivation(isEnabled: isEnabled, sensitivity: sensitivity, result: result)
+
+    case "setMicrophoneMuted":
+      guard
+        let arguments = call.arguments as? [String: Any],
+        let isMuted = arguments["isMuted"] as? Bool
+      else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "isMuted is required.",
+            details: nil
+          )
+        )
+        return
+      }
+      setMicrophoneMuted(isMuted, result: result)
 
     case "stopSession":
       stopSession()
@@ -184,7 +220,19 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       return
     }
 
+    if isActive && isMicrophoneMuted {
+      result(
+        FlutterError(
+          code: "microphone_muted",
+          message: "Microphone is muted on this device.",
+          details: nil
+        )
+      )
+      return
+    }
+
     if isActive {
+      isVoiceActivationEnabled = false
       ensureMicrophonePermission { [weak self] granted in
         guard let self else {
           result(
@@ -260,9 +308,64 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     #endif
   }
 
+  private func configureVoiceActivation(
+    isEnabled: Bool,
+    sensitivity: Double,
+    result: @escaping FlutterResult
+  ) {
+    #if canImport(NearbyConnections)
+    isVoiceActivationEnabled = isEnabled
+    isPushToTalkActive = false
+    voiceActivationSensitivity = sensitivity
+    syncVoiceActivation()
+    emit(
+      event: "voice_activation_state",
+      message: isEnabled ? "Voice activation configured." : "Voice activation disabled.",
+      extra: ["isVoiceActivationArmed": audioController.isVoiceActivationArmed]
+    )
+    result(nil)
+    #else
+    result(
+      FlutterError(
+        code: "sdk_missing",
+        message: "Nearby Connections Swift package is not linked into the iOS target yet.",
+        details: nil
+      )
+    )
+    #endif
+  }
+
+  private func setMicrophoneMuted(_ isMuted: Bool, result: @escaping FlutterResult) {
+    #if canImport(NearbyConnections)
+    isMicrophoneMuted = isMuted
+    if isMuted {
+      isPushToTalkActive = false
+      connectedEndpoints.forEach { sendControlPayload(type: "audio_stop", to: $0) }
+      audioController.stopTransmitting()
+    }
+    syncVoiceActivation()
+    emit(
+      event: "microphone_state",
+      message: isMuted ? "Microphone muted on this device." : "Microphone unmuted on this device.",
+      extra: ["isVoiceActivationArmed": audioController.isVoiceActivationArmed]
+    )
+    result(nil)
+    #else
+    result(
+      FlutterError(
+        code: "sdk_missing",
+        message: "Nearby Connections Swift package is not linked into the iOS target yet.",
+        details: nil
+      )
+    )
+    #endif
+  }
+
   private func stopSession() {
     #if canImport(NearbyConnections)
     isPushToTalkActive = false
+    isVoiceActivationEnabled = false
+    isMicrophoneMuted = false
     audioController.stopAll()
     connectedEndpoints.forEach { connectionManager.disconnect(from: $0) }
     advertiser?.stopAdvertising()
@@ -294,6 +397,8 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       "isDiscovering": isDiscovering,
       "isReceivingAudio": peerSessions.values.contains { $0.isConnected && $0.isSpeaking },
       "isTransmitting": audioController.isTransmitting,
+      "transmitMode": isVoiceActivationEnabled ? "voice_activated" : "push_to_talk",
+      "isVoiceActivationArmed": audioController.isVoiceActivationArmed,
       "peers": peerSessions.values
         .sorted {
           if $0.isConnected == $1.isConnected {
@@ -378,6 +483,25 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       isTransmitting: audioController.isTransmitting
     )
   }
+
+  private func syncVoiceActivation() {
+    guard isVoiceActivationEnabled, !isMicrophoneMuted else {
+      audioController.setVoiceActivation(enabled: false, sensitivity: voiceActivationSensitivity)
+      return
+    }
+
+    let validatedEndpoints = Set(connectedEndpoints.filter { endpointRoomMatches[$0] == true })
+    audioController.setVoiceActivation(
+      enabled: !validatedEndpoints.isEmpty,
+      sensitivity: voiceActivationSensitivity
+    )
+    if !validatedEndpoints.isEmpty {
+      try? audioController.syncTransmittingEndpoints(
+        validatedEndpoints,
+        connectionManager: connectionManager
+      )
+    }
+  }
 }
 
 #if canImport(NearbyConnections)
@@ -441,6 +565,7 @@ extension NearbyConnectionsBridge: DiscovererDelegate {
         connectionManager: connectionManager
       )
     }
+    syncVoiceActivation()
     startDiscoveryBurst(message: "Peer left range. Scanning briefly for reconnects.")
   }
 }
@@ -476,6 +601,7 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
           connectionManager: connectionManager
         )
       }
+      syncVoiceActivation()
       emit(event: "connected", message: "Connected to \(peerSessions[endpointID]?.displayName ?? "nearby peer") over Nearby Connections.")
     case .disconnected:
       connectedEndpoints.remove(endpointID)
@@ -489,6 +615,7 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
           connectionManager: connectionManager
         )
       }
+      syncVoiceActivation()
       emit(event: "disconnected", message: "Nearby peer disconnected. Room remains open for new connections.")
       startDiscoveryBurst(message: "Peer disconnected. Scanning briefly for another nearby peer.")
     default:
@@ -785,19 +912,33 @@ private final class NearbyAudioController {
   private let streamSampleRate = Double(16_000)
   private let frameSamples = 320
   private let frameByteCount = 640
+  private let voiceActivationProcessor = VoiceActivationProcessor(
+    frameMillis: 20,
+    sensitivity: 0.55
+  )
 
   private var captureConverter: AVAudioConverter?
+  private var activeConnectionManager: ConnectionManager?
   private var outboundStreams = [EndpointID: BoundOutputStream]()
+  private var transmitEndpointIDs = Set<EndpointID>()
   private var inboundReaders = [EndpointID: IncomingAudioStreamReader]()
   private var inboundBuffers = [EndpointID: PeerAudioBuffer]()
   private var pendingCaptureData = Data()
+  private var preRollFrames = [Data]()
   private var isConfigured = false
   private var queuedPlaybackFrames: AVAudioFramePosition = 0
   private var teardownWorkItem: DispatchWorkItem?
   private var mixerTimer: DispatchSourceTimer?
+  private var transmissionMode = TransmissionMode.manual
+  private var isVoiceActivationEnabled = false
+  private var isVoiceActivationArmedState = false
 
   var isTransmitting: Bool {
     withStateLock { !outboundStreams.isEmpty }
+  }
+
+  var isVoiceActivationArmed: Bool {
+    withStateLock { isVoiceActivationArmedState }
   }
 
   private var captureFormat: AVAudioFormat {
@@ -838,8 +979,12 @@ private final class NearbyAudioController {
     cancelTeardown()
     try prepareAudioGraph()
     try configureAudioEngineIfNeeded()
+    withStateLock {
+      activeConnectionManager = connectionManager
+      transmitEndpointIDs = endpoints
+    }
 
-    if endpoints.isEmpty {
+    if endpoints.isEmpty && transmissionMode == .manual {
       stopTransmitting()
       return
     }
@@ -849,22 +994,46 @@ private final class NearbyAudioController {
     }
     endpointsToRemove.forEach(removeOutboundStream)
 
-    let endpointsToAdd = withStateLock {
-      endpoints.filter { outboundStreams[$0] == nil }
-    }
-    for endpointID in endpointsToAdd {
-      try addOutboundStream(endpointID, connectionManager: connectionManager)
+    let shouldOpenStreams = transmissionMode == .manual || isTransmitting
+    if shouldOpenStreams {
+      let endpointsToAdd = withStateLock {
+        endpoints.filter { outboundStreams[$0] == nil }
+      }
+      for endpointID in endpointsToAdd {
+        try addOutboundStream(endpointID, connectionManager: connectionManager)
+      }
     }
 
     try ensureCaptureTapRunning()
   }
 
+  func setVoiceActivation(enabled: Bool, sensitivity: Double) {
+    withStateLock {
+      isVoiceActivationEnabled = enabled
+      transmissionMode = enabled ? .voiceActivated : .manual
+      voiceActivationProcessor.updateSensitivity(sensitivity)
+      isVoiceActivationArmedState = enabled
+      if !enabled {
+        voiceActivationProcessor.resetSpeechState()
+        preRollFrames.removeAll(keepingCapacity: false)
+      }
+    }
+    if !enabled {
+      stopTransmitting()
+    }
+  }
+
   func stopTransmitting() {
-    audioEngine.inputNode.removeTap(onBus: 0)
+    if !isVoiceActivationEnabled {
+      audioEngine.inputNode.removeTap(onBus: 0)
+    }
     let streamsToClose = withStateLock {
       let streams = Array(outboundStreams.values)
       outboundStreams.removeAll()
-      captureConverter = nil
+      if !isVoiceActivationEnabled {
+        transmitEndpointIDs.removeAll()
+        captureConverter = nil
+      }
       return streams
     }
     streamsToClose.forEach { $0.close() }
@@ -962,7 +1131,7 @@ private final class NearbyAudioController {
   private func removeOutboundStream(_ endpointID: EndpointID) {
     let result = withStateLock {
       let stream = outboundStreams.removeValue(forKey: endpointID)
-      let isEmpty = outboundStreams.isEmpty
+      let isEmpty = outboundStreams.isEmpty && !isVoiceActivationEnabled
       if isEmpty {
         captureConverter = nil
       }
@@ -1051,7 +1220,10 @@ private final class NearbyAudioController {
 
   private func writeCapturedAudio(_ buffer: AVAudioPCMBuffer) {
     let converter = withStateLock { captureConverter }
-    guard isTransmitting, let converter else {
+    let shouldCapture = withStateLock {
+      transmissionMode == .voiceActivated || !outboundStreams.isEmpty
+    }
+    guard shouldCapture, let converter else {
       return
     }
 
@@ -1114,12 +1286,51 @@ private final class NearbyAudioController {
       }
       return frames
     }
-    frames.forEach(broadcast)
+    frames.forEach(handleCapturedFrame)
   }
 
   private func clearPendingCaptureData() {
     withStateLock {
       pendingCaptureData.removeAll(keepingCapacity: false)
+    }
+  }
+
+  private func handleCapturedFrame(_ data: Data) {
+    if transmissionMode == .manual {
+      if isTransmitting {
+        broadcast(data)
+      }
+      return
+    }
+
+    let decision = withStateLock { () -> VoiceActivationDecision in
+      preRollFrames.append(data)
+      if preRollFrames.count > 10 {
+        preRollFrames.removeFirst(preRollFrames.count - 10)
+      }
+      return voiceActivationProcessor.process(data)
+    }
+
+    if decision.shouldStartTransmitting {
+      let state = withStateLock {
+        (transmitEndpointIDs, activeConnectionManager, preRollFrames)
+      }
+      if !state.0.isEmpty, let connectionManager = state.1 {
+        do {
+          try openVoiceActivationStreams(state.0, connectionManager: connectionManager)
+        } catch {
+          onError(error.localizedDescription)
+        }
+        state.2.forEach(broadcast)
+      }
+    }
+
+    if isTransmitting {
+      broadcast(data)
+    }
+
+    if decision.shouldStopTransmitting {
+      stopTransmitting()
     }
   }
 
@@ -1132,6 +1343,18 @@ private final class NearbyAudioController {
       if !succeeded {
         removeOutboundStream(endpointID)
       }
+    }
+  }
+
+  private func openVoiceActivationStreams(
+    _ endpoints: Set<EndpointID>,
+    connectionManager: ConnectionManager
+  ) throws {
+    let endpointsToAdd = withStateLock {
+      endpoints.filter { outboundStreams[$0] == nil }
+    }
+    for endpointID in endpointsToAdd {
+      try addOutboundStream(endpointID, connectionManager: connectionManager)
     }
   }
 
@@ -1405,6 +1628,111 @@ private final class IncomingAudioStreamReader {
     stateLock.lock()
     defer { stateLock.unlock() }
     return stopped
+  }
+}
+
+private enum TransmissionMode {
+  case manual
+  case voiceActivated
+}
+
+private struct VoiceActivationDecision {
+  let shouldStartTransmitting: Bool
+  let shouldStopTransmitting: Bool
+}
+
+private final class VoiceActivationProcessor {
+  private let frameMillis: Int
+  private var dynamicFloor: Double = 0.008
+  private var attackFrames = 0
+  private var releaseFrames = 0
+  private var isSpeechActive = false
+  private var sensitivity: Double
+
+  init(frameMillis: Int, sensitivity: Double) {
+    self.frameMillis = frameMillis
+    self.sensitivity = sensitivity
+  }
+
+  func updateSensitivity(_ sensitivity: Double) {
+    self.sensitivity = min(1.0, max(0.0, sensitivity))
+  }
+
+  func resetSpeechState() {
+    attackFrames = 0
+    releaseFrames = 0
+    isSpeechActive = false
+  }
+
+  func process(_ frame: Data) -> VoiceActivationDecision {
+    let rms = frameRms(frame)
+    let attackBoost = 0.02 - (sensitivity * 0.012)
+    let releaseBoost = attackBoost * 0.55
+    let startThreshold = max(dynamicFloor * 2.1, dynamicFloor + attackBoost)
+    let stopThreshold = max(dynamicFloor * 1.45, dynamicFloor + releaseBoost)
+
+    if !isSpeechActive || rms < stopThreshold {
+      dynamicFloor = (dynamicFloor * 0.985) + (rms * 0.015)
+    } else {
+      dynamicFloor = (dynamicFloor * 0.998) + (rms * 0.002)
+    }
+
+    var shouldStart = false
+    var shouldStop = false
+    if !isSpeechActive {
+      if rms >= startThreshold {
+        attackFrames += 1
+        if attackFrames >= 3 {
+          attackFrames = 0
+          releaseFrames = 0
+          isSpeechActive = true
+          shouldStart = true
+        }
+      } else {
+        attackFrames = 0
+      }
+    } else {
+      if rms < stopThreshold {
+        releaseFrames += 1
+        if releaseFrames * frameMillis >= 700 {
+          releaseFrames = 0
+          attackFrames = 0
+          isSpeechActive = false
+          shouldStop = true
+        }
+      } else {
+        releaseFrames = 0
+      }
+    }
+
+    return VoiceActivationDecision(
+      shouldStartTransmitting: shouldStart,
+      shouldStopTransmitting: shouldStop
+    )
+  }
+
+  private func frameRms(_ frame: Data) -> Double {
+    guard !frame.isEmpty else {
+      return 0
+    }
+
+    var sumSquares = 0.0
+    var sampleCount = 0
+    frame.withUnsafeBytes { rawBuffer in
+      guard let samples = rawBuffer.bindMemory(to: Int16.self).baseAddress else {
+        return
+      }
+      let count = rawBuffer.count / MemoryLayout<Int16>.stride
+      sampleCount = count
+      for index in 0..<count {
+        let normalized = Double(samples[index]) / 32768.0
+        sumSquares += normalized * normalized
+      }
+    }
+    guard sampleCount > 0 else {
+      return 0
+    }
+    return Foundation.sqrt(sumSquares / Double(sampleCount))
   }
 }
 
