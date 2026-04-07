@@ -1158,14 +1158,13 @@ private final class NearbyAudioController {
 
   private func mixAndSchedulePlayback() {
     let buffers = withStateLock { Array(inboundBuffers) }
-    let frames = Dictionary(
-      uniqueKeysWithValues: buffers.compactMap { endpointID, buffer in
-        guard let frame = buffer.drainFrame(frameByteCount: frameByteCount) else {
-          return nil
-        }
-        return (endpointID, frame)
+    var frames = [EndpointID: Data]()
+    for (endpointID, buffer) in buffers {
+      guard let frame = buffer.drainFrame(frameByteCount: frameByteCount) else {
+        continue
       }
-    )
+      frames[endpointID] = frame
+    }
     guard !frames.isEmpty else {
       return
     }
