@@ -1003,23 +1003,17 @@ private final class NearbyAudioController {
     withStateLock { isVoiceActivationArmedState }
   }
 
-  private var captureFormat: AVAudioFormat {
-    AVAudioFormat(
-      commonFormat: .pcmFormatInt16,
-      sampleRate: streamSampleRate,
-      channels: 1,
-      interleaved: false
-    )!
-  }
+  private lazy var captureFormat: AVAudioFormat? = Self.makeAudioFormat(
+    commonFormat: .pcmFormatInt16,
+    sampleRate: streamSampleRate,
+    channels: 1
+  )
 
-  private var playbackFormat: AVAudioFormat {
-    AVAudioFormat(
-      commonFormat: .pcmFormatFloat32,
-      sampleRate: streamSampleRate,
-      channels: 1,
-      interleaved: false
-    )!
-  }
+  private lazy var playbackFormat: AVAudioFormat? = Self.makeAudioFormat(
+    commonFormat: .pcmFormatFloat32,
+    sampleRate: streamSampleRate,
+    channels: 1
+  )
 
   init(
     prepareAudioSession: @escaping () throws -> Void,
@@ -1247,6 +1241,9 @@ private final class NearbyAudioController {
 
     try syncOnAudioGraphQueue {
       audioEngine.attach(playerNode)
+      guard let playbackFormat else {
+        throw NearbyAudioError.playbackFormatCreationFailed
+      }
       audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
     }
   }
@@ -1259,6 +1256,9 @@ private final class NearbyAudioController {
     try syncOnAudioGraphQueue {
       let inputNode = audioEngine.inputNode
       let inputFormat = inputNode.outputFormat(forBus: 0)
+      guard let captureFormat else {
+        throw NearbyAudioError.captureFormatCreationFailed
+      }
       let needsConverter = withStateLock { captureConverter == nil }
       if needsConverter {
         guard let converter = AVAudioConverter(from: inputFormat, to: captureFormat) else {
@@ -1315,6 +1315,10 @@ private final class NearbyAudioController {
 
   private func writeCapturedAudio(_ buffer: AVAudioPCMBuffer) {
     let converter = withStateLock { captureConverter }
+    guard let captureFormat else {
+      onError(NearbyAudioError.captureFormatCreationFailed.localizedDescription)
+      return
+    }
     let shouldCapture = withStateLock {
       transmissionMode == .voiceActivated || !outboundStreams.isEmpty
     }
@@ -1507,6 +1511,7 @@ private final class NearbyAudioController {
     }
 
     guard
+      let playbackFormat,
       let playbackBuffer = AVAudioPCMBuffer(
         pcmFormat: playbackFormat,
         frameCapacity: AVAudioFrameCount(frameSamples)
@@ -1634,6 +1639,19 @@ private final class NearbyAudioController {
     }
 
     return (inputStream as InputStream, outputStream as OutputStream)
+  }
+
+  private static func makeAudioFormat(
+    commonFormat: AVAudioCommonFormat,
+    sampleRate: Double,
+    channels: AVAudioChannelCount
+  ) -> AVAudioFormat? {
+    AVAudioFormat(
+      commonFormat: commonFormat,
+      sampleRate: sampleRate,
+      channels: channels,
+      interleaved: false
+    )
   }
 }
 
@@ -1878,12 +1896,18 @@ private final class VoiceActivationProcessor {
 }
 
 private enum NearbyAudioError: LocalizedError {
+  case captureFormatCreationFailed
+  case playbackFormatCreationFailed
   case converterCreationFailed
   case captureConversionFailed
   case streamCreationFailed
 
   var errorDescription: String? {
     switch self {
+    case .captureFormatCreationFailed:
+      return "Unable to prepare the iOS microphone capture format for Nearby audio."
+    case .playbackFormatCreationFailed:
+      return "Unable to prepare the iOS playback format for Nearby audio."
     case .converterCreationFailed:
       return "Unable to prepare the iOS audio format converter for Nearby audio."
     case .captureConversionFailed:
