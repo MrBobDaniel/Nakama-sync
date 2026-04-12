@@ -16,6 +16,9 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       guard let self else { return }
       self.emit(event: "error", message: reason)
       self.stopSession()
+    },
+    onAudioSessionActivated: { [weak self] in
+      self?.syncPendingTransmitStateAfterAudioActivation()
     }
   )
   private var roomID: String?
@@ -278,6 +281,14 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
 
         do {
           self.isPushToTalkActive = true
+          guard self.commsSessionManager.isVoiceAudioSessionReady else {
+            self.emit(
+              event: "os_session_state",
+              message: "Waiting for iOS audio session activation before transmitting."
+            )
+            result(nil)
+            return
+          }
           try self.audioController.syncTransmittingEndpoints(
             Set(validatedEndpoints),
             connectionManager: self.connectionManager
@@ -511,11 +522,34 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       enabled: !validatedEndpoints.isEmpty,
       sensitivity: voiceActivationSensitivity
     )
-    if !validatedEndpoints.isEmpty {
+    if !validatedEndpoints.isEmpty, commsSessionManager.isVoiceAudioSessionReady {
       try? audioController.syncTransmittingEndpoints(
         validatedEndpoints,
         connectionManager: connectionManager
       )
+    }
+  }
+
+  private func syncPendingTransmitStateAfterAudioActivation() {
+    let validatedEndpoints = Set(connectedEndpoints.filter { endpointRoomMatches[$0] == true })
+    guard !isMicrophoneMuted else {
+      return
+    }
+
+    if isPushToTalkActive, !validatedEndpoints.isEmpty {
+      do {
+        try audioController.syncTransmittingEndpoints(
+          validatedEndpoints,
+          connectionManager: connectionManager
+        )
+      } catch {
+        emit(event: "error", message: error.localizedDescription)
+      }
+      return
+    }
+
+    if isVoiceActivationEnabled {
+      syncVoiceActivation()
     }
   }
 }

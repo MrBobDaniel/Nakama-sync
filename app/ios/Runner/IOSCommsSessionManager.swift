@@ -14,6 +14,7 @@ final class IOSCommsSessionManager: NSObject {
   private let session = AVAudioSession.sharedInstance()
   private let onStateChanged: (String, [String: Any]) -> Void
   private let onSystemSessionEnded: (String) -> Void
+  private let onAudioSessionActivated: () -> Void
 
   private var activeCallUUID: UUID?
   private var roomID: String?
@@ -31,10 +32,12 @@ final class IOSCommsSessionManager: NSObject {
 
   init(
     onStateChanged: @escaping (String, [String: Any]) -> Void,
-    onSystemSessionEnded: @escaping (String) -> Void
+    onSystemSessionEnded: @escaping (String) -> Void,
+    onAudioSessionActivated: @escaping () -> Void = {}
   ) {
     self.onStateChanged = onStateChanged
     self.onSystemSessionEnded = onSystemSessionEnded
+    self.onAudioSessionActivated = onAudioSessionActivated
 
     let configuration = CXProviderConfiguration(localizedName: "Nakama Sync")
     configuration.supportsVideo = false
@@ -123,6 +126,10 @@ final class IOSCommsSessionManager: NSObject {
   func prepareForVoiceAudio() throws {
     isVoiceAudioPrepared = true
     try applyAudioSessionConfiguration()
+  }
+
+  var isVoiceAudioSessionReady: Bool {
+    activeCallUUID == nil || isCallKitActivated
   }
 
   func deactivateVoiceAudio() {
@@ -302,6 +309,7 @@ extension IOSCommsSessionManager: CXProviderDelegate {
     do {
       try applyAudioSessionConfiguration()
       emitState(message: audioStatusMessage())
+      onAudioSessionActivated()
     } catch {
       emitState(message: "iOS audio session activation failed: \(error.localizedDescription)")
     }
