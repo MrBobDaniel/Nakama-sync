@@ -251,6 +251,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
 
     if isActive {
       isVoiceActivationEnabled = false
+      audioController.setVoiceActivation(enabled: false, sensitivity: voiceActivationSensitivity)
       ensureMicrophonePermission { [weak self] granted in
         guard let self else {
           result(
@@ -932,6 +933,7 @@ private final class NearbyAudioController {
   private let transmitQueue = DispatchQueue(label: "nakama_sync.nearby.audio.tx")
   private let receiveQueue = DispatchQueue(label: "nakama_sync.nearby.audio.rx")
   private let playbackQueue = DispatchQueue(label: "nakama_sync.nearby.audio.playback")
+  private let audioGraphQueue = DispatchQueue(label: "nakama_sync.nearby.audio.graph")
   private let streamSampleRate = Double(16_000)
   private let frameSamples = 320
   private let frameByteCount = 640
@@ -957,6 +959,7 @@ private final class NearbyAudioController {
   private var isVoiceActivationEnabled = false
   private var isVoiceActivationArmedState = false
   private var lastReportedTransmitState: Bool?
+  private let audioGraphQueueKey = DispatchSpecificKey<Void>()
 
   var isTransmitting: Bool {
     withStateLock { !outboundStreams.isEmpty }
@@ -997,6 +1000,7 @@ private final class NearbyAudioController {
     self.onTransmitStateChanged = onTransmitStateChanged
     self.onPeerSpeakingChanged = onPeerSpeakingChanged
     transmitQueue.setSpecific(key: transmitQueueKey, value: ())
+    audioGraphQueue.setSpecific(key: audioGraphQueueKey, value: ())
   }
 
   func syncTransmittingEndpoints(
@@ -1052,7 +1056,9 @@ private final class NearbyAudioController {
 
   func stopTransmitting() {
     if !isVoiceActivationEnabled {
-      audioEngine.inputNode.removeTap(onBus: 0)
+      syncOnAudioGraphQueue {
+        audioEngine.inputNode.removeTap(onBus: 0)
+      }
     }
     let streamsToClose = withStateLock {
       let streams = Array(outboundStreams.values)
@@ -1182,7 +1188,9 @@ private final class NearbyAudioController {
     }
     result.0?.close()
     if result.1 {
-      audioEngine.inputNode.removeTap(onBus: 0)
+      syncOnAudioGraphQueue {
+        audioEngine.inputNode.removeTap(onBus: 0)
+      }
       clearPendingCaptureData()
     }
     updateTransmitStateIfNeeded(
@@ -1203,8 +1211,10 @@ private final class NearbyAudioController {
       return
     }
 
-    audioEngine.attach(playerNode)
-    audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
+    try syncOnAudioGraphQueue {
+      audioEngine.attach(playerNode)
+      audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: playbackFormat)
+    }
   }
 
   private func prepareAudioGraph() throws {
@@ -1212,39 +1222,43 @@ private final class NearbyAudioController {
   }
 
   private func ensureCaptureTapRunning() throws {
-    let inputNode = audioEngine.inputNode
-    let inputFormat = inputNode.outputFormat(forBus: 0)
-    let needsConverter = withStateLock { captureConverter == nil }
-    if needsConverter {
-      guard let converter = AVAudioConverter(from: inputFormat, to: captureFormat) else {
-        throw NearbyAudioError.converterCreationFailed
+    try syncOnAudioGraphQueue {
+      let inputNode = audioEngine.inputNode
+      let inputFormat = inputNode.outputFormat(forBus: 0)
+      let needsConverter = withStateLock { captureConverter == nil }
+      if needsConverter {
+        guard let converter = AVAudioConverter(from: inputFormat, to: captureFormat) else {
+          throw NearbyAudioError.converterCreationFailed
+        }
+        withStateLock {
+          captureConverter = converter
+        }
+        inputNode.removeTap(onBus: 0)
+        inputNode.installTap(
+          onBus: 0,
+          bufferSize: AVAudioFrameCount(frameSamples),
+          format: inputFormat
+        ) { [weak self] buffer, _ in
+          self?.writeCapturedAudio(buffer)
+        }
       }
-      withStateLock {
-        captureConverter = converter
-      }
-      inputNode.removeTap(onBus: 0)
-      inputNode.installTap(
-        onBus: 0,
-        bufferSize: AVAudioFrameCount(frameSamples),
-        format: inputFormat
-      ) { [weak self] buffer, _ in
-        self?.writeCapturedAudio(buffer)
-      }
-    }
 
-    if !audioEngine.isRunning {
-      audioEngine.prepare()
-      try audioEngine.start()
+      if !audioEngine.isRunning {
+        audioEngine.prepare()
+        try audioEngine.start()
+      }
     }
   }
 
   private func ensurePlaybackRunning() throws {
-    if !audioEngine.isRunning {
-      audioEngine.prepare()
-      try audioEngine.start()
-    }
-    if !playerNode.isPlaying {
-      playerNode.play()
+    try syncOnAudioGraphQueue {
+      if !audioEngine.isRunning {
+        audioEngine.prepare()
+        try audioEngine.start()
+      }
+      if !playerNode.isPlaying {
+        playerNode.play()
+      }
     }
   }
 
@@ -1539,15 +1553,15 @@ private final class NearbyAudioController {
       return
     }
 
-    audioEngine.inputNode.removeTap(onBus: 0)
-    playbackQueue.sync {
+    syncOnAudioGraphQueue {
+      audioEngine.inputNode.removeTap(onBus: 0)
       playerNode.stop()
-      self.withStateLock {
-        self.queuedPlaybackFrames = 0
+      if audioEngine.isRunning {
+        audioEngine.stop()
       }
     }
-    if audioEngine.isRunning {
-      audioEngine.stop()
+    withStateLock {
+      queuedPlaybackFrames = 0
     }
     let timer = withStateLock {
       let timer = mixerTimer
@@ -1564,6 +1578,13 @@ private final class NearbyAudioController {
     stateLock.lock()
     defer { stateLock.unlock() }
     return body()
+  }
+
+  private func syncOnAudioGraphQueue<T>(_ body: () throws -> T) rethrows -> T {
+    if DispatchQueue.getSpecific(key: audioGraphQueueKey) != nil {
+      return try body()
+    }
+    return try audioGraphQueue.sync(execute: body)
   }
 
   private func makeBoundStreams() throws -> (input: InputStream, output: OutputStream) {

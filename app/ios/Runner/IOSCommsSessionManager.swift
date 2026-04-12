@@ -163,7 +163,12 @@ final class IOSCommsSessionManager: NSObject {
   private func applyAudioSessionConfiguration() throws {
     let shouldKeepSessionActive = isVoiceAudioPrepared || isReceivingAudio || isTransmitting
     guard shouldKeepSessionActive else {
-      deactivateAudioSession()
+      isAudioSessionConfigured = false
+      if activeCallUUID == nil {
+        deactivateAudioSession()
+      } else {
+        emitState(message: "iOS CallKit session is standing by for Link audio.")
+      }
       return
     }
 
@@ -185,13 +190,13 @@ final class IOSCommsSessionManager: NSObject {
     )
     try session.setPreferredSampleRate(16_000)
     try session.setPreferredIOBufferDuration(0.01)
-    try session.setActive(true)
-    isCallKitActivated = true
     isAudioSessionConfigured = true
   }
 
   private func deactivateAudioSession() {
-    try? session.setActive(false, options: [.notifyOthersOnDeactivation])
+    if activeCallUUID == nil || !isCallKitActivated {
+      try? session.setActive(false, options: [.notifyOthersOnDeactivation])
+    }
     isCallKitActivated = false
     isAudioSessionConfigured = false
   }
@@ -294,7 +299,12 @@ extension IOSCommsSessionManager: CXProviderDelegate {
 
   func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
     isCallKitActivated = true
-    emitState(message: audioStatusMessage())
+    do {
+      try applyAudioSessionConfiguration()
+      emitState(message: audioStatusMessage())
+    } catch {
+      emitState(message: "iOS audio session activation failed: \(error.localizedDescription)")
+    }
   }
 
   func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {

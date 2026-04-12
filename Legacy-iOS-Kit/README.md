@@ -111,7 +111,7 @@
     - iPhone 2G, 3G, 3GS, iPod touch 1, touch 2 - All versions are supported
     - Lowest downgradable version is 2.0. Going to 1.x does not work
     - For jailbreaking support, see below
-- [Restoring the iPod touch 3rd gen and iPad 1 to iOS 6 untethered](https://github.com/LukeZGD/Legacy-iOS-Kit/wiki/touch3-ios6)
+- [Restoring the iPod touch 3rd gen and iPad 1 to iOS 6 (and also iOS 7 for iPad 1) untethered](https://github.com/LukeZGD/Legacy-iOS-Kit/wiki/touch3-ios6)
 - [Restoring the iPod touch 4th gen to iOS 7 tethered](https://github.com/LukeZGD/Legacy-iOS-Kit/wiki/touch4-ios7)
 - Jailbreaking for 32-bit devices and versions support:
     - iPhone 2G and touch 1 - 3.1.3 only
@@ -205,3 +205,6 @@
     - Mineek's [restored_external patcher](https://gist.github.com/mineek/16c2607c928477dcd273e680e40a1c90) for iPhone X downgrades to 14.3-15.x
     - [KPlooshFinder](https://github.com/plooshi/KPlooshFinder/tree/amfi-only)
     - [kerneldiff](https://gist.github.com/LukeZGD/8c719b613ca28d6883552437bdd500de)
+- iPad 1 and iPod touch 3 unofficial upgrades:
+    - [SundanceInH2A](https://github.com/NyanSatan/SundanceInH2A) - NyanSatan
+    - [ipad-1-ios-7](https://github.com/amy-and-nicole/ipad-1-ios-7) - amy-and-nicole and pwnerblu, also uses stuff from SundanceInH2A
