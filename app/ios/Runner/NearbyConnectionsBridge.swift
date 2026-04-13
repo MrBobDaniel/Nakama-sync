@@ -24,6 +24,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   )
   private var roomID: String?
   private var displayName = "Nakama Sync iPhone"
+  private var localPeerID = UUID().uuidString.lowercased()
   private var localAudioConfig = NearbyAudioConfig.defaultConfig
   private var eventSink: FlutterEventSink?
 
@@ -147,10 +148,12 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     #if canImport(NearbyConnections)
     let requestedRoomID = roomID
     let requestedDisplayName = displayName
+    let requestedPeerID = localPeerID
     let requestedAudioConfig = localAudioConfig
     stopSession()
     roomID = requestedRoomID
     displayName = requestedDisplayName
+    localPeerID = requestedPeerID
     localAudioConfig = requestedAudioConfig
     audioController.stopAll()
     audioController = makeAudioController()
@@ -578,8 +581,12 @@ extension NearbyConnectionsBridge: DiscovererDelegate {
     endpointAudioConfigs[endpointID] = remoteEndpoint.audioConfig
     let remoteName = remoteEndpoint.displayName ?? "nearby peer"
     upsertPeer(endpointID: endpointID, displayName: remoteName)
-    emit(event: "peer_discovered", message: "Found nearby peer \(remoteName).")
-    scheduleConnectionRequest(for: endpointID, remoteName: remoteName)
+    if shouldInitiateConnection(to: remoteEndpoint.peerID, endpointID: endpointID) {
+      emit(event: "peer_discovered", message: "Found nearby peer \(remoteName).")
+      scheduleConnectionRequest(for: endpointID, remoteName: remoteName)
+    } else {
+      emit(event: "peer_discovered", message: "Found nearby peer \(remoteName). Waiting for inbound connection.")
+    }
   }
 
   func discoverer(_ discoverer: Discoverer, didLose endpointID: EndpointID) {
@@ -717,6 +724,7 @@ private extension NearbyConnectionsBridge {
     let payload: [String: Any] = [
       "roomId": normalizedRoomID() ?? NSNull(),
       "displayName": displayName,
+      "peerId": localPeerID,
       "preferredCodec": localAudioConfig.codec,
       "supportedCodecs": localAudioConfig.supportedCodecs,
       "preferredSampleRate": localAudioConfig.preferredSampleRate,
@@ -738,6 +746,7 @@ private extension NearbyConnectionsBridge {
       "type": type,
       "roomId": normalizedRoomID() ?? NSNull(),
       "displayName": displayName,
+      "peerId": localPeerID,
       "preferredCodec": localAudioConfig.codec,
       "supportedCodecs": localAudioConfig.supportedCodecs,
       "preferredSampleRate": localAudioConfig.preferredSampleRate,
@@ -827,6 +836,7 @@ private extension NearbyConnectionsBridge {
       return NearbyEndpointContext(
         roomID: nil,
         displayName: String(data: context, encoding: .utf8),
+        peerID: nil,
         audioConfig: NearbyAudioConfig()
       )
     }
@@ -834,6 +844,7 @@ private extension NearbyConnectionsBridge {
     return NearbyEndpointContext(
       roomID: Self.normalizeRoomID(json["roomId"] as? String),
       displayName: json["displayName"] as? String,
+      peerID: json["peerId"] as? String,
       audioConfig: parseAudioConfig(json)
     )
   }
@@ -843,6 +854,15 @@ private extension NearbyConnectionsBridge {
       .trimmingCharacters(in: .whitespacesAndNewlines)
       .lowercased()
     return normalized?.isEmpty == false ? normalized : nil
+  }
+
+  func shouldInitiateConnection(to remotePeerID: String?, endpointID: EndpointID) -> Bool {
+    let normalizedLocalPeerID = localPeerID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let normalizedRemotePeerID = remotePeerID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if let normalizedRemotePeerID, !normalizedRemotePeerID.isEmpty {
+      return normalizedLocalPeerID < normalizedRemotePeerID
+    }
+    return endpointID.lowercased() >= normalizedLocalPeerID
   }
 
   func startDiscoveryBurst(message: String) {
@@ -905,6 +925,7 @@ private extension NearbyConnectionsBridge {
   struct NearbyEndpointContext {
     let roomID: String?
     let displayName: String?
+    let peerID: String?
     let audioConfig: NearbyAudioConfig
   }
 

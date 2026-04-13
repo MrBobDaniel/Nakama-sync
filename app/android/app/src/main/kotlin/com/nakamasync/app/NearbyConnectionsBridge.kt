@@ -48,6 +48,7 @@ import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.OutputStream
 import java.util.ArrayDeque
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -74,6 +75,7 @@ class NearbyConnectionsBridge(
     private var eventSink: EventChannel.EventSink? = null
     private var roomId: String? = null
     private var displayName: String = "Nakama Sync Android"
+    private var localPeerId: String = UUID.randomUUID().toString()
     private var localAudioConfig = NearbyAudioConfig()
     private var incomingAudioMixer = createIncomingAudioMixer()
     private var outgoingAudioFanout: OutgoingAudioFanout? = null
@@ -219,10 +221,12 @@ class NearbyConnectionsBridge(
 
         val requestedRoomId = roomId
         val requestedDisplayName = displayName
+        val requestedPeerId = localPeerId
         val requestedAudioConfig = localAudioConfig
         stopSession()
         roomId = requestedRoomId
         displayName = requestedDisplayName
+        localPeerId = requestedPeerId
         localAudioConfig = requestedAudioConfig
         incomingAudioMixer = createIncomingAudioMixer()
 
@@ -615,8 +619,12 @@ class NearbyConnectionsBridge(
 
             val remoteName = remoteEndpoint.displayName ?: info.endpointName
             upsertPeer(endpointId, remoteName)
-            emit("peer_discovered", "Found nearby peer ${remoteName.ifBlank { "in this room" }}.")
-            scheduleConnectionRequest(endpointId, remoteName)
+            if (shouldInitiateConnection(remoteEndpoint.peerId, endpointId)) {
+                emit("peer_discovered", "Found nearby peer ${remoteName.ifBlank { "in this room" }}.")
+                scheduleConnectionRequest(endpointId, remoteName)
+            } else {
+                emit("peer_discovered", "Found nearby peer ${remoteName.ifBlank { "in this room" }}. Waiting for inbound connection.")
+            }
         }
 
         override fun onEndpointLost(endpointId: String) {
@@ -747,6 +755,7 @@ class NearbyConnectionsBridge(
             .put("type", type)
             .put("roomId", roomId)
             .put("displayName", displayName)
+            .put("peerId", localPeerId)
             .put("codec", localAudioConfig.codec)
             .put("preferredCodec", localAudioConfig.codec)
             .put("supportedCodecs", JSONArray(localAudioConfig.supportedCodecs))
@@ -826,6 +835,7 @@ class NearbyConnectionsBridge(
         return JSONObject()
             .put("roomId", roomId)
             .put("displayName", displayName)
+            .put("peerId", localPeerId)
             .put("codec", localAudioConfig.codec)
             .put("preferredCodec", localAudioConfig.codec)
             .put("supportedCodecs", JSONArray(localAudioConfig.supportedCodecs))
@@ -848,6 +858,16 @@ class NearbyConnectionsBridge(
         return if (normalized.isNullOrEmpty()) null else normalized
     }
 
+    private fun shouldInitiateConnection(remotePeerId: String?, endpointId: String): Boolean {
+        val normalizedRemotePeerId = remotePeerId?.trim()?.lowercase()
+        val normalizedLocalPeerId = localPeerId.trim().lowercase()
+        return if (normalizedRemotePeerId.isNullOrEmpty()) {
+            endpointId.lowercase() >= normalizedLocalPeerId
+        } else {
+            normalizedLocalPeerId < normalizedRemotePeerId
+        }
+    }
+
     private fun parseEndpointInfo(endpointInfo: ByteArray?): NearbyEndpointInfo {
         if (endpointInfo == null || endpointInfo.isEmpty()) {
             return NearbyEndpointInfo()
@@ -860,6 +880,7 @@ class NearbyConnectionsBridge(
         return NearbyEndpointInfo(
             roomId = normalizeRoomId(json.optString("roomId").ifBlank { null }),
             displayName = json.optString("displayName").ifBlank { null },
+            peerId = json.optString("peerId").ifBlank { null },
             audioConfig = parseAudioConfig(json),
         )
     }
@@ -1066,6 +1087,7 @@ class NearbyConnectionsBridge(
     private data class NearbyEndpointInfo(
         val roomId: String? = null,
         val displayName: String? = null,
+        val peerId: String? = null,
         val audioConfig: NearbyAudioConfig = NearbyAudioConfig(),
     )
 
