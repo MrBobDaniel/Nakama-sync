@@ -2,12 +2,14 @@ import Flutter
 import AVFoundation
 import AudioToolbox
 import Foundation
+import os.log
 
 #if canImport(NearbyConnections)
 import NearbyConnections
 #endif
 
 final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
+  private let logger = Logger(subsystem: "com.nakamasync.app", category: "NearbyConnections")
   private let serviceID = "com.nakamasync.app.walkie"
   private lazy var commsSessionManager = IOSCommsSessionManager(
     onStateChanged: { [weak self] (message: String, extra: [String: Any]) in
@@ -385,6 +387,18 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   }
 
   private func emit(event: String, message: String, extra: [String: Any] = [:]) {
+    logger.info(
+      """
+      event=\(event, privacy: .public) \
+      roomId=\(self.normalizedRoomID() ?? "null", privacy: .public) \
+      connectedPeers=\(self.connectedEndpoints.filter { self.endpointRoomMatches[$0] == true }.count) \
+      discovering=\(self.isDiscovering) \
+      tx=\(self.audioController.isTransmitting) \
+      rx=\(self.peerSessions.values.contains { $0.isConnected && $0.isSpeaking }) \
+      message=\(message, privacy: .public) \
+      extra=\(String(describing: extra), privacy: .public)
+      """
+    )
     let deliver = { [weak self] in
       guard let self else { return }
       let currentRoomID = self.normalizedRoomID()

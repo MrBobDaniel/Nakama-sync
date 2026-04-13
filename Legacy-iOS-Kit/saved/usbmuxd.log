@@ -1,7 +1,7 @@
-[12:22:02.297][3] usbmuxd v1.1.1-49-g61b99ab starting up
-[12:22:02.297][3] Using libusb 1.0.25
-[12:22:02.303][3] Initialization complete
-[12:22:02.303][2] Skipping switch device 3-12 mode from 1 to 1
-[12:22:02.303][3] Found usbmux interface for device 3-12: 1
-[12:22:02.304][3] Connecting to new device on location 0x3000c as ID 1
-[12:22:02.304][3] Connected to v2.0 device 1 on location 0x3000c with serial number 00008120-001A35862E880032
+[15:36:43.568][3] usbmuxd v1.1.1-49-g61b99ab starting up
+[15:36:43.568][3] Using libusb 1.0.25
+[15:36:43.574][3] Initialization complete
+[15:36:43.575][2] Skipping switch device 3-13 mode from 1 to 1
+[15:36:43.575][3] Found usbmux interface for device 3-13: 1
+[15:36:43.575][3] Connecting to new device on location 0x3000d as ID 1
+[15:36:43.576][3] Connected to v2.0 device 1 on location 0x3000d with serial number 00008120-001A35862E880032

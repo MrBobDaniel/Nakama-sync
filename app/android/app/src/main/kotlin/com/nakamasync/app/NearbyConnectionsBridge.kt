@@ -22,6 +22,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.ContextCompat
+import android.util.Log
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import com.google.android.gms.common.api.ApiException
@@ -58,6 +59,7 @@ import kotlin.math.min
 class NearbyConnectionsBridge(
     private val context: Context,
 ) : MethodChannel.MethodCallHandler, EventChannel.StreamHandler {
+    private val logTag = "NakamaNearby"
     private val activity = context as? Activity
     private val strategy = Strategy.P2P_CLUSTER
     private val serviceId = "com.nakamasync.app.walkie"
@@ -435,6 +437,29 @@ class NearbyConnectionsBridge(
     }
 
     private fun emit(event: String, message: String, extra: Map<String, Any?> = emptyMap()) {
+        Log.i(
+            logTag,
+            buildString {
+                append("event=")
+                append(event)
+                append(" roomId=")
+                append(roomId ?: "null")
+                append(" connectedPeers=")
+                append(activeEndpoints.count { endpointRoomMatches[it] == true })
+                append(" discovering=")
+                append(isDiscovering)
+                append(" tx=")
+                append(outgoingAudioFanout?.isTransmittingActive() == true)
+                append(" rx=")
+                append(peerSessions.values.any { it.isSpeaking && it.isConnected })
+                append(" message=")
+                append(message)
+                if (extra.isNotEmpty()) {
+                    append(" extra=")
+                    append(extra)
+                }
+            },
+        )
         val payload = linkedMapOf<String, Any?>(
             "event" to event,
             "message" to message,
