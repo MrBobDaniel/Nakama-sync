@@ -121,7 +121,7 @@ class NearbyConnectionsBridge(
                     return
                 }
 
-                roomId = normalizedRoomId
+                roomId = normalizeRoomId(normalizedRoomId)
                 displayName = normalizedDisplayName
                 val arguments = call.arguments as? Map<*, *> ?: emptyMap<String, Any?>()
                 localAudioConfig = parseAudioConfig(JSONObject(arguments))
@@ -605,17 +605,13 @@ class NearbyConnectionsBridge(
                 return
             }
 
-        val remoteEndpoint = parseEndpointInfo(info.endpointInfo)
-        endpointAudioConfigs[endpointId] = remoteEndpoint.audioConfig
-        if (!roomMatches(remoteEndpoint.roomId)) {
-            return
-        }
-        audioConfigMismatchReason(remoteEndpoint.audioConfig)?.let { mismatch ->
-            emit("peer_incompatible", "Ignoring nearby peer with incompatible audio mode: $mismatch.")
-            return
-        }
+            val remoteEndpoint = parseEndpointInfo(info.endpointInfo)
+            endpointAudioConfigs[endpointId] = remoteEndpoint.audioConfig
+            if (!roomMatches(remoteEndpoint.roomId)) {
+                return
+            }
 
-        val remoteName = remoteEndpoint.displayName ?: info.endpointName
+            val remoteName = remoteEndpoint.displayName ?: info.endpointName
             upsertPeer(endpointId, remoteName)
             emit("peer_discovered", "Found nearby peer ${remoteName.ifBlank { "in this room" }}.")
             scheduleConnectionRequest(endpointId, remoteName)
@@ -651,13 +647,6 @@ class NearbyConnectionsBridge(
                 emit("error", "Ignoring Nearby peer from a different room.")
                 return
             }
-            audioConfigMismatchReason(remoteEndpoint.audioConfig)?.let { mismatch ->
-                endpointRoomMatches[endpointId] = false
-                connectionsClient.rejectConnection(endpointId)
-                emit("error", "Rejecting Nearby peer with incompatible audio mode: $mismatch.")
-                return
-            }
-
             val remoteName = remoteEndpoint.displayName ?: info.endpointName
             upsertPeer(endpointId, remoteName)
             emit("connection_initiated", "Connection initiated with $remoteName.")
@@ -795,8 +784,8 @@ class NearbyConnectionsBridge(
             }
         }
 
-        val localRoomId = roomId?.trim()
-        val peerRoomId = json.optString("roomId").trim().ifEmpty { null }
+        val localRoomId = normalizeRoomId(roomId)
+        val peerRoomId = normalizeRoomId(json.optString("roomId").ifBlank { null })
         if (!localRoomId.isNullOrEmpty() && peerRoomId != localRoomId) {
             endpointRoomMatches[endpointId] = false
             activeEndpoints.remove(endpointId)
@@ -808,21 +797,9 @@ class NearbyConnectionsBridge(
             return
         }
 
-        val remoteAudioConfig = parseAudioConfig(json)
-        audioConfigMismatchReason(remoteAudioConfig)?.let { mismatch ->
-            endpointRoomMatches[endpointId] = false
-            activeEndpoints.remove(endpointId)
-            outgoingAudioFanout?.removeEndpoint(endpointId)
-            incomingAudioMixer.stopEndpoint(endpointId)
-            connectionsClient.disconnectFromEndpoint(endpointId)
-            removePeer(endpointId)
-            emit("error", "Nearby peer has incompatible room audio settings: $mismatch.")
-            return
-        }
-
         val remoteName = json.optString("displayName").ifBlank { peerSessions[endpointId]?.displayName ?: "Nearby peer" }
         endpointRoomMatches[endpointId] = true
-        endpointAudioConfigs[endpointId] = remoteAudioConfig
+        endpointAudioConfigs[endpointId] = parseAudioConfig(json)
         upsertPeer(
             endpointId,
             remoteName,
@@ -859,9 +836,14 @@ class NearbyConnectionsBridge(
     }
 
     private fun roomMatches(peerRoomId: String?): Boolean {
-        val localRoomId = roomId?.trim()
-        val normalizedPeerRoomId = peerRoomId?.trim()
+        val localRoomId = normalizeRoomId(roomId)
+        val normalizedPeerRoomId = normalizeRoomId(peerRoomId)
         return localRoomId.isNullOrEmpty() || normalizedPeerRoomId == localRoomId
+    }
+
+    private fun normalizeRoomId(value: String?): String? {
+        val normalized = value?.trim()?.lowercase()
+        return if (normalized.isNullOrEmpty()) null else normalized
     }
 
     private fun parseEndpointInfo(endpointInfo: ByteArray?): NearbyEndpointInfo {
@@ -874,43 +856,20 @@ class NearbyConnectionsBridge(
         }.getOrNull() ?: return NearbyEndpointInfo()
 
         return NearbyEndpointInfo(
-            roomId = json.optString("roomId").ifBlank { null },
+            roomId = normalizeRoomId(json.optString("roomId").ifBlank { null }),
             displayName = json.optString("displayName").ifBlank { null },
             audioConfig = parseAudioConfig(json),
         )
     }
 
     private fun parseAudioConfig(json: JSONObject): NearbyAudioConfig {
-        val supportedCodecsJson = json.optJSONArray("supportedCodecs")
-        val supportedCodecs = mutableListOf<String>()
-        if (supportedCodecsJson != null) {
-            for (index in 0 until supportedCodecsJson.length()) {
-                val codec = supportedCodecsJson.optString(index)
-                if (codec.isNotBlank()) {
-                    supportedCodecs.add(codec)
-                }
-            }
-        }
-        val supportedRatesJson = json.optJSONArray("supportedSampleRates")
-        val supportedSampleRates = mutableListOf<Int>()
-        if (supportedRatesJson != null) {
-            for (index in 0 until supportedRatesJson.length()) {
-                val rate = supportedRatesJson.optInt(index)
-                if (rate > 0) {
-                    supportedSampleRates.add(rate)
-                }
-            }
-        }
-
         return NearbyAudioConfig(
-            codec = json.optString("preferredCodec").ifBlank {
-                json.optString("codec").ifBlank { DEFAULT_CODEC }
-            },
-            supportedCodecs = supportedCodecs.ifEmpty { listOf(DEFAULT_CODEC) },
-            preferredSampleRate = json.optInt("preferredSampleRate", DEFAULT_STREAM_SAMPLE_RATE),
-            supportedSampleRates = supportedSampleRates.ifEmpty { listOf(DEFAULT_STREAM_SAMPLE_RATE) },
-            frameDurationMs = json.optInt("frameDurationMs", STREAM_CHUNK_MILLIS).coerceAtLeast(1),
-            transportVersion = json.optInt("transportVersion", CURRENT_TRANSPORT_VERSION).coerceAtLeast(1),
+            codec = DEFAULT_CODEC,
+            supportedCodecs = listOf(DEFAULT_CODEC),
+            preferredSampleRate = DEFAULT_STREAM_SAMPLE_RATE,
+            supportedSampleRates = listOf(DEFAULT_STREAM_SAMPLE_RATE),
+            frameDurationMs = STREAM_CHUNK_MILLIS,
+            transportVersion = CURRENT_TRANSPORT_VERSION,
         )
     }
 

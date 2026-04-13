@@ -31,6 +31,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
     ConnectToRoomRequested event,
     Emitter<CommsState> emit,
   ) async {
+    final normalizedRoomId = event.roomId.trim().toLowerCase();
     final diagnostics = _appendDiagnostic(
       state.diagnostics,
       const CommsDiagnosticEntry(
@@ -46,7 +47,7 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
     );
     emit(
       CommsSessionOpen(
-        event.roomId,
+        normalizedRoomId,
         statusMessage: 'Opening room for nearby connections.',
         diagnostics: diagnostics,
         isMicrophoneMuted: state.isMicrophoneMuted,
@@ -58,12 +59,12 @@ class CommsBloc extends Bloc<CommsEvent, CommsState> {
     );
 
     try {
-      await _transportService.initialize(event.roomId, event.audioProfile);
+      await _transportService.initialize(normalizedRoomId, event.audioProfile);
     } catch (error) {
       emit(
         CommsFailure(
           error.toString(),
-          roomId: event.roomId,
+          roomId: normalizedRoomId,
           diagnostics: _appendDiagnostic(
             diagnostics,
             CommsDiagnosticEntry(

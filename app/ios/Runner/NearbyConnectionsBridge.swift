@@ -69,7 +69,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
         return
       }
 
-      self.roomID = roomID
+      self.roomID = Self.normalizeRoomID(roomID)
       self.displayName = displayName
       localAudioConfig = parseAudioConfig(arguments)
       startSession(result: result)
@@ -552,14 +552,6 @@ extension NearbyConnectionsBridge: AdvertiserDelegate {
       connectionRequestHandler(false)
       return
     }
-    if let mismatch = audioConfigMismatchReason(remoteEndpoint.audioConfig) {
-      cancelPendingConnectionRequest(for: endpointID)
-      endpointRoomMatches[endpointID] = false
-      emit(event: "error", message: "Rejecting Nearby peer with incompatible audio mode: \(mismatch).")
-      connectionRequestHandler(false)
-      return
-    }
-
     cancelPendingConnectionRequest(for: endpointID)
     let remoteName = remoteEndpoint.displayName ?? "nearby peer"
     upsertPeer(endpointID: endpointID, displayName: remoteName)
@@ -572,10 +564,6 @@ extension NearbyConnectionsBridge: DiscovererDelegate {
   func discoverer(_ discoverer: Discoverer, didFind endpointID: EndpointID, with context: Data) {
     let remoteEndpoint = parseEndpointContext(context)
     guard roomMatches(remoteEndpoint.roomID) else {
-      return
-    }
-    if let mismatch = audioConfigMismatchReason(remoteEndpoint.audioConfig) {
-      emit(event: "peer_incompatible", message: "Ignoring nearby peer with incompatible audio mode: \(mismatch).")
       return
     }
     guard !connectedEndpoints.contains(endpointID) else {
@@ -719,8 +707,7 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
 
 private extension NearbyConnectionsBridge {
   func normalizedRoomID() -> String? {
-    let trimmed = roomID?.trimmingCharacters(in: .whitespacesAndNewlines)
-    return trimmed?.isEmpty == false ? trimmed : nil
+    Self.normalizeRoomID(roomID)
   }
 
   func endpointContextData() -> Data {
@@ -785,8 +772,8 @@ private extension NearbyConnectionsBridge {
       return false
     }
 
-    let peerRoomID = (json["roomId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let normalizedRoomID = roomID?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let peerRoomID = Self.normalizeRoomID(json["roomId"] as? String)
+    let normalizedRoomID = normalizedRoomID()
 
     if let normalizedRoomID, !normalizedRoomID.isEmpty, peerRoomID != normalizedRoomID {
       endpointRoomMatches[endpointID] = false
@@ -800,21 +787,8 @@ private extension NearbyConnectionsBridge {
       return true
     }
 
-    let remoteAudioConfig = parseAudioConfig(json)
-    if let mismatch = audioConfigMismatchReason(remoteAudioConfig) {
-      endpointRoomMatches[endpointID] = false
-      connectedEndpoints.remove(endpointID)
-      cancelPendingConnectionRequest(for: endpointID)
-      pendingOutgoingConnections.remove(endpointID)
-      audioController.handleEndpointDisconnected(endpointID)
-      removePeer(endpointID)
-      emit(event: "error", message: "Nearby peer has incompatible room audio settings: \(mismatch).")
-      disconnect(endpointID)
-      return true
-    }
-
     endpointRoomMatches[endpointID] = true
-    endpointAudioConfigs[endpointID] = remoteAudioConfig
+    endpointAudioConfigs[endpointID] = parseAudioConfig(json)
     let remoteName = (json["displayName"] as? String) ?? peerSessions[endpointID]?.displayName ?? "Nearby peer"
     upsertPeer(
       endpointID: endpointID,
@@ -837,7 +811,7 @@ private extension NearbyConnectionsBridge {
   }
 
   func roomMatches(_ peerRoomID: String?) -> Bool {
-    let normalizedPeerRoomID = peerRoomID?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let normalizedPeerRoomID = Self.normalizeRoomID(peerRoomID)
     guard let normalizedRoomID = normalizedRoomID() else {
       return true
     }
@@ -856,10 +830,17 @@ private extension NearbyConnectionsBridge {
     }
 
     return NearbyEndpointContext(
-      roomID: (json["roomId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+      roomID: Self.normalizeRoomID(json["roomId"] as? String),
       displayName: json["displayName"] as? String,
       audioConfig: parseAudioConfig(json)
     )
+  }
+
+  static func normalizeRoomID(_ value: String?) -> String? {
+    let normalized = value?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+    return normalized?.isEmpty == false ? normalized : nil
   }
 
   func startDiscoveryBurst(message: String) {
@@ -973,21 +954,13 @@ private extension NearbyConnectionsBridge {
   }
 
   func parseAudioConfig(_ json: [String: Any]) -> NearbyAudioConfig {
-    let supportedCodecs =
-      (json["supportedCodecs"] as? [String])?.filter { !$0.isEmpty }
-      ?? (json["supportedCodecs"] as? [NSString])?.map { $0 as String }.filter { !$0.isEmpty }
-      ?? []
-    let supportedRates =
-      (json["supportedSampleRates"] as? [Int])?.filter { $0 > 0 }
-      ?? (json["supportedSampleRates"] as? [NSNumber])?.map(\.intValue).filter { $0 > 0 }
-      ?? []
     return NearbyAudioConfig(
-      codec: (json["preferredCodec"] as? String) ?? (json["codec"] as? String) ?? NearbyAudioConfig.defaultCodec,
-      supportedCodecs: supportedCodecs,
-      preferredSampleRate: (json["preferredSampleRate"] as? Int) ?? NearbyAudioConfig.defaultStreamSampleRate,
-      supportedSampleRates: supportedRates,
-      frameDurationMs: (json["frameDurationMs"] as? Int) ?? NearbyAudioConfig.defaultFrameDurationMs,
-      transportVersion: (json["transportVersion"] as? Int) ?? NearbyAudioConfig.currentTransportVersion
+      codec: NearbyAudioConfig.defaultCodec,
+      supportedCodecs: [NearbyAudioConfig.defaultCodec],
+      preferredSampleRate: NearbyAudioConfig.defaultStreamSampleRate,
+      supportedSampleRates: [NearbyAudioConfig.defaultStreamSampleRate],
+      frameDurationMs: NearbyAudioConfig.defaultFrameDurationMs,
+      transportVersion: NearbyAudioConfig.currentTransportVersion
     )
   }
 
