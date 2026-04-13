@@ -834,8 +834,21 @@ class NearbyConnectionsBridge(
         }
 
         val remoteName = json.optString("displayName").ifBlank { peerSessions[endpointId]?.displayName ?: "Nearby peer" }
+        val remoteAudioConfig = parseAudioConfig(json)
+        val mismatchReason = audioConfigMismatchReason(remoteAudioConfig)
+        if (mismatchReason != null) {
+            endpointRoomMatches[endpointId] = false
+            activeEndpoints.remove(endpointId)
+            outgoingAudioFanout?.removeEndpoint(endpointId)
+            incomingAudioMixer.stopEndpoint(endpointId)
+            connectionsClient.disconnectFromEndpoint(endpointId)
+            removePeer(endpointId)
+            emit("error", "Nearby peer in this room is incompatible: $mismatchReason.")
+            return
+        }
+
         endpointRoomMatches[endpointId] = true
-        endpointAudioConfigs[endpointId] = parseAudioConfig(json)
+        endpointAudioConfigs[endpointId] = remoteAudioConfig
         upsertPeer(
             endpointId,
             remoteName,
@@ -911,13 +924,47 @@ class NearbyConnectionsBridge(
     }
 
     private fun parseAudioConfig(json: JSONObject): NearbyAudioConfig {
+        val codec = json.optString("preferredCodec").ifBlank {
+            json.optString("codec").ifBlank { DEFAULT_CODEC }
+        }
+        val supportedCodecs = buildList {
+            val codecsArray = json.optJSONArray("supportedCodecs")
+            if (codecsArray != null) {
+                for (index in 0 until codecsArray.length()) {
+                    val value = codecsArray.optString(index).trim()
+                    if (value.isNotEmpty()) {
+                        add(value)
+                    }
+                }
+            }
+            if (codec.isNotBlank() && codec !in this) {
+                add(0, codec)
+            }
+        }.ifEmpty { listOf(codec.ifBlank { DEFAULT_CODEC }) }
+
+        val preferredSampleRate = json.optInt("preferredSampleRate").takeIf { it > 0 } ?: DEFAULT_STREAM_SAMPLE_RATE
+        val supportedSampleRates = buildList {
+            val sampleRatesArray = json.optJSONArray("supportedSampleRates")
+            if (sampleRatesArray != null) {
+                for (index in 0 until sampleRatesArray.length()) {
+                    val value = sampleRatesArray.optInt(index)
+                    if (value > 0) {
+                        add(value)
+                    }
+                }
+            }
+            if (preferredSampleRate !in this) {
+                add(0, preferredSampleRate)
+            }
+        }.ifEmpty { listOf(preferredSampleRate) }
+
         return NearbyAudioConfig(
-            codec = DEFAULT_CODEC,
-            supportedCodecs = listOf(DEFAULT_CODEC),
-            preferredSampleRate = DEFAULT_STREAM_SAMPLE_RATE,
-            supportedSampleRates = listOf(DEFAULT_STREAM_SAMPLE_RATE),
-            frameDurationMs = STREAM_CHUNK_MILLIS,
-            transportVersion = CURRENT_TRANSPORT_VERSION,
+            codec = codec.ifBlank { DEFAULT_CODEC },
+            supportedCodecs = supportedCodecs,
+            preferredSampleRate = preferredSampleRate,
+            supportedSampleRates = supportedSampleRates,
+            frameDurationMs = json.optInt("frameDurationMs").takeIf { it > 0 } ?: STREAM_CHUNK_MILLIS,
+            transportVersion = json.optInt("transportVersion").takeIf { it > 0 } ?: CURRENT_TRANSPORT_VERSION,
         )
     }
 

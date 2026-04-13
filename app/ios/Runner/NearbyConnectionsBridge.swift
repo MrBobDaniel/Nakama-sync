@@ -387,18 +387,14 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   }
 
   private func emit(event: String, message: String, extra: [String: Any] = [:]) {
+    let logLine =
+      "event=\(event) roomId=\(self.normalizedRoomID() ?? "null") connectedPeers=\(self.connectedEndpoints.filter { self.endpointRoomMatches[$0] == true }.count) discovering=\(self.isDiscovering) tx=\(self.audioController.isTransmitting) rx=\(self.peerSessions.values.contains { $0.isConnected && $0.isSpeaking }) message=\(message) extra=\(String(describing: extra))"
     logger.info(
       """
-      event=\(event, privacy: .public) \
-      roomId=\(self.normalizedRoomID() ?? "null", privacy: .public) \
-      connectedPeers=\(self.connectedEndpoints.filter { self.endpointRoomMatches[$0] == true }.count) \
-      discovering=\(self.isDiscovering) \
-      tx=\(self.audioController.isTransmitting) \
-      rx=\(self.peerSessions.values.contains { $0.isConnected && $0.isSpeaking }) \
-      message=\(message, privacy: .public) \
-      extra=\(String(describing: extra), privacy: .public)
+      \(logLine, privacy: .public)
       """
     )
+    NSLog("%@", logLine)
     let deliver = { [weak self] in
       guard let self else { return }
       let currentRoomID = self.normalizedRoomID()
@@ -812,8 +808,21 @@ private extension NearbyConnectionsBridge {
       return true
     }
 
+    let remoteAudioConfig = parseAudioConfig(json)
+    if let mismatchReason = audioConfigMismatchReason(remoteAudioConfig) {
+      endpointRoomMatches[endpointID] = false
+      connectedEndpoints.remove(endpointID)
+      cancelPendingConnectionRequest(for: endpointID)
+      pendingOutgoingConnections.remove(endpointID)
+      audioController.handleEndpointDisconnected(endpointID)
+      removePeer(endpointID)
+      emit(event: "error", message: "Nearby peer in this room is incompatible: \(mismatchReason).")
+      disconnect(endpointID)
+      return true
+    }
+
     endpointRoomMatches[endpointID] = true
-    endpointAudioConfigs[endpointID] = parseAudioConfig(json)
+    endpointAudioConfigs[endpointID] = remoteAudioConfig
     let remoteName = (json["displayName"] as? String) ?? peerSessions[endpointID]?.displayName ?? "Nearby peer"
     upsertPeer(
       endpointID: endpointID,
@@ -984,13 +993,45 @@ private extension NearbyConnectionsBridge {
   }
 
   func parseAudioConfig(_ json: [String: Any]) -> NearbyAudioConfig {
+    let preferredCodec =
+      (json["preferredCodec"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let fallbackCodec =
+      (json["codec"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let codec =
+      !(preferredCodec?.isEmpty ?? true) ? preferredCodec!
+      : (!(fallbackCodec?.isEmpty ?? true) ? fallbackCodec! : NearbyAudioConfig.defaultCodec)
+
+    let supportedCodecs = {
+      var values = (json["supportedCodecs"] as? [String] ?? [])
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+      if !values.contains(codec) {
+        values.insert(codec, at: 0)
+      }
+      return values.isEmpty ? [codec] : values
+    }()
+
+    let preferredSampleRate =
+      (json["preferredSampleRate"] as? Int).flatMap { $0 > 0 ? $0 : nil }
+      ?? NearbyAudioConfig.defaultStreamSampleRate
+
+    let supportedSampleRates = {
+      var values = (json["supportedSampleRates"] as? [Int] ?? []).filter { $0 > 0 }
+      if !values.contains(preferredSampleRate) {
+        values.insert(preferredSampleRate, at: 0)
+      }
+      return values.isEmpty ? [preferredSampleRate] : values
+    }()
+
     return NearbyAudioConfig(
-      codec: NearbyAudioConfig.defaultCodec,
-      supportedCodecs: [NearbyAudioConfig.defaultCodec],
-      preferredSampleRate: NearbyAudioConfig.defaultStreamSampleRate,
-      supportedSampleRates: [NearbyAudioConfig.defaultStreamSampleRate],
-      frameDurationMs: NearbyAudioConfig.defaultFrameDurationMs,
-      transportVersion: NearbyAudioConfig.currentTransportVersion
+      codec: codec,
+      supportedCodecs: supportedCodecs,
+      preferredSampleRate: preferredSampleRate,
+      supportedSampleRates: supportedSampleRates,
+      frameDurationMs: max(1, json["frameDurationMs"] as? Int ?? NearbyAudioConfig.defaultFrameDurationMs),
+      transportVersion: max(1, json["transportVersion"] as? Int ?? NearbyAudioConfig.currentTransportVersion)
     )
   }
 
