@@ -981,7 +981,7 @@ private extension NearbyConnectionsBridge {
       (json["supportedSampleRates"] as? [Int])?.filter { $0 > 0 }
       ?? (json["supportedSampleRates"] as? [NSNumber])?.map(\.intValue).filter { $0 > 0 }
       ?? []
-    NearbyAudioConfig(
+    return NearbyAudioConfig(
       codec: (json["preferredCodec"] as? String) ?? (json["codec"] as? String) ?? NearbyAudioConfig.defaultCodec,
       supportedCodecs: supportedCodecs,
       preferredSampleRate: (json["preferredSampleRate"] as? Int) ?? NearbyAudioConfig.defaultStreamSampleRate,
