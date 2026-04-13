@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../../features/comms/comms_audio_profile.dart';
+
 class NearbyConnectionsManager {
   static const MethodChannel _channel =
       MethodChannel('nakama_sync.local/nearby_connections');
@@ -14,11 +16,20 @@ class NearbyConnectionsManager {
   static Future<void> startSession({
     required String roomId,
     required String displayName,
+    required CommsAudioProfile audioProfile,
   }) async {
     try {
       await _channel.invokeMethod<void>('startSession', {
         'roomId': roomId,
         'displayName': displayName,
+        'audioProfileId': audioProfile.id,
+        'codec': audioProfile.codecWireValue,
+        'preferredCodec': audioProfile.codecWireValue,
+        'supportedCodecs': audioProfile.supportedCodecWireValues,
+        'preferredSampleRate': audioProfile.sampleRate,
+        'supportedSampleRates': audioProfile.supportedSampleRates,
+        'frameDurationMs': audioProfile.frameDurationMs,
+        'transportVersion': audioProfile.transportVersion,
       });
     } on PlatformException catch (error) {
       debugPrint(

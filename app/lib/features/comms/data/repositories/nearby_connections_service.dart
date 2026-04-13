@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import '../../../../core/native_bridge/nearby_connections_manager.dart';
+import '../../comms_audio_profile.dart';
 import 'comms_transport_service.dart';
 
 class NearbyConnectionsService implements CommsTransportService {
@@ -15,11 +16,12 @@ class NearbyConnectionsService implements CommsTransportService {
   Stream<Map<String, dynamic>> get events => NearbyConnectionsManager.events;
 
   @override
-  Future<void> initialize(String roomId) {
+  Future<void> initialize(String roomId, CommsAudioProfile audioProfile) {
     final platformSuffix = Platform.isIOS ? 'iPhone' : 'Android';
     return NearbyConnectionsManager.startSession(
       roomId: roomId,
       displayName: '$_displayName $platformSuffix',
+      audioProfile: audioProfile,
     );
   }
 

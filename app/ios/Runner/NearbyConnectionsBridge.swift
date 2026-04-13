@@ -1,5 +1,6 @@
 import Flutter
 import AVFoundation
+import AudioToolbox
 import Foundation
 
 #if canImport(NearbyConnections)
@@ -23,6 +24,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   )
   private var roomID: String?
   private var displayName = "Nakama Sync iPhone"
+  private var localAudioConfig = NearbyAudioConfig.defaultConfig
   private var eventSink: FlutterEventSink?
 
   #if canImport(NearbyConnections)
@@ -44,39 +46,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   private var voiceActivationSensitivity = 0.55
   private var isMicrophoneMuted = false
   private var discoveryStopWorkItem: DispatchWorkItem?
-  private lazy var audioController = NearbyAudioController(
-    prepareAudioSession: { [weak self] in
-      guard let self else { return }
-      try self.commsSessionManager.prepareForVoiceAudio()
-    },
-    deactivateAudioSession: { [weak self] in
-      self?.commsSessionManager.deactivateVoiceAudio()
-    },
-    onError: { [weak self] message in
-      DispatchQueue.main.async {
-        self?.emit(event: "error", message: message)
-      }
-    },
-    onTransmitStateChanged: { [weak self] isTransmitting, message in
-      DispatchQueue.main.async {
-        guard let self else { return }
-        self.syncOSAudioState()
-        self.emit(
-          event: "transmit_state",
-          message: message,
-          extra: [
-            "isTransmitting": isTransmitting,
-            "audioSampleRate": NearbyAudioConfig.defaultStreamSampleRate
-          ]
-        )
-      }
-    },
-    onPeerSpeakingChanged: { [weak self] endpointID, isSpeaking in
-      DispatchQueue.main.async {
-        self?.updatePeerSpeaking(endpointID, isSpeaking: isSpeaking)
-      }
-    }
-  )
+  private lazy var audioController = makeAudioController()
   #endif
 
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -101,6 +71,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
 
       self.roomID = roomID
       self.displayName = displayName
+      localAudioConfig = parseAudioConfig(arguments)
       startSession(result: result)
 
     case "setPushToTalkActive":
@@ -179,6 +150,8 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     stopSession()
     roomID = requestedRoomID
     displayName = requestedDisplayName
+    audioController.stopAll()
+    audioController = makeAudioController()
     let osSessionResult = commsSessionManager.startSession(
       roomID: roomID ?? "",
       displayName: displayName
@@ -402,6 +375,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     commsSessionManager.stopSession()
     roomID = nil
     displayName = "Nakama Sync iPhone"
+    localAudioConfig = NearbyAudioConfig.defaultConfig
     #endif
   }
 
@@ -419,6 +393,10 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
         "isTransmitting": self.audioController.isTransmitting,
         "transmitMode": self.isVoiceActivationEnabled ? "voice_activated" : "push_to_talk",
         "isVoiceActivationArmed": self.audioController.isVoiceActivationArmed,
+        "audioSampleRate": self.localAudioConfig.preferredSampleRate,
+        "codec": self.localAudioConfig.codec,
+        "frameDurationMs": self.localAudioConfig.frameDurationMs,
+        "transportVersion": self.localAudioConfig.transportVersion,
         "peers": self.peerSessions.values
           .sorted {
             if $0.isConnected == $1.isConnected {
@@ -433,6 +411,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
               "isConnected": peer.isConnected,
               "isSpeaking": peer.isSpeaking,
               "streamSampleRate": peer.streamSampleRate,
+              "codec": peer.codec,
             ]
           }
       ]
@@ -452,7 +431,8 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     displayName: String?,
     isConnected: Bool? = nil,
     isSpeaking: Bool? = nil,
-    streamSampleRate: Int? = nil
+    streamSampleRate: Int? = nil,
+    codec: String? = nil
   ) {
     let existing = peerSessions[endpointID]
     peerSessions[endpointID] = PeerSession(
@@ -460,7 +440,8 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       displayName: (displayName?.isEmpty == false ? displayName : existing?.displayName) ?? "Nearby peer",
       isConnected: isConnected ?? existing?.isConnected ?? false,
       isSpeaking: isSpeaking ?? existing?.isSpeaking ?? false,
-      streamSampleRate: streamSampleRate ?? existing?.streamSampleRate ?? NearbyAudioConfig.defaultStreamSampleRate
+      streamSampleRate: streamSampleRate ?? existing?.streamSampleRate ?? localAudioConfig.preferredSampleRate,
+      codec: codec ?? existing?.codec ?? localAudioConfig.codec
     )
   }
 
@@ -571,6 +552,13 @@ extension NearbyConnectionsBridge: AdvertiserDelegate {
       connectionRequestHandler(false)
       return
     }
+    if let mismatch = audioConfigMismatchReason(remoteEndpoint.audioConfig) {
+      cancelPendingConnectionRequest(for: endpointID)
+      endpointRoomMatches[endpointID] = false
+      emit(event: "error", message: "Rejecting Nearby peer with incompatible audio mode: \(mismatch).")
+      connectionRequestHandler(false)
+      return
+    }
 
     cancelPendingConnectionRequest(for: endpointID)
     let remoteName = remoteEndpoint.displayName ?? "nearby peer"
@@ -582,7 +570,12 @@ extension NearbyConnectionsBridge: AdvertiserDelegate {
 
 extension NearbyConnectionsBridge: DiscovererDelegate {
   func discoverer(_ discoverer: Discoverer, didFind endpointID: EndpointID, with context: Data) {
-    guard roomMatches(parseEndpointContext(context).roomID) else {
+    let remoteEndpoint = parseEndpointContext(context)
+    guard roomMatches(remoteEndpoint.roomID) else {
+      return
+    }
+    if let mismatch = audioConfigMismatchReason(remoteEndpoint.audioConfig) {
+      emit(event: "peer_incompatible", message: "Ignoring nearby peer with incompatible audio mode: \(mismatch).")
       return
     }
     guard !connectedEndpoints.contains(endpointID) else {
@@ -592,7 +585,6 @@ extension NearbyConnectionsBridge: DiscovererDelegate {
       return
     }
 
-    let remoteEndpoint = parseEndpointContext(context)
     endpointAudioConfigs[endpointID] = remoteEndpoint.audioConfig
     let remoteName = remoteEndpoint.displayName ?? "nearby peer"
     upsertPeer(endpointID: endpointID, displayName: remoteName)
@@ -642,7 +634,8 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
         endpointID: endpointID,
         displayName: peerSessions[endpointID]?.displayName,
         isConnected: true,
-        streamSampleRate: NearbyAudioConfig.defaultStreamSampleRate
+        streamSampleRate: agreedSampleRate(with: endpointID),
+        codec: agreedCodec(with: endpointID)
       )
       sendHandshake(to: endpointID)
       if isPushToTalkActive {
@@ -735,8 +728,12 @@ private extension NearbyConnectionsBridge {
     let payload: [String: Any] = [
       "roomId": normalizedRoomID() ?? NSNull(),
       "displayName": displayName,
+      "preferredCodec": localAudioConfig.codec,
+      "supportedCodecs": localAudioConfig.supportedCodecs,
       "preferredSampleRate": localAudioConfig.preferredSampleRate,
       "supportedSampleRates": localAudioConfig.supportedSampleRates,
+      "frameDurationMs": localAudioConfig.frameDurationMs,
+      "transportVersion": localAudioConfig.transportVersion,
     ]
 
     return (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
@@ -752,8 +749,12 @@ private extension NearbyConnectionsBridge {
       "type": type,
       "roomId": normalizedRoomID() ?? NSNull(),
       "displayName": displayName,
+      "preferredCodec": localAudioConfig.codec,
+      "supportedCodecs": localAudioConfig.supportedCodecs,
       "preferredSampleRate": localAudioConfig.preferredSampleRate,
       "supportedSampleRates": localAudioConfig.supportedSampleRates,
+      "frameDurationMs": localAudioConfig.frameDurationMs,
+      "transportVersion": localAudioConfig.transportVersion,
     ]
     guard
       let payloadData = try? JSONSerialization.data(
@@ -799,14 +800,28 @@ private extension NearbyConnectionsBridge {
       return true
     }
 
+    let remoteAudioConfig = parseAudioConfig(json)
+    if let mismatch = audioConfigMismatchReason(remoteAudioConfig) {
+      endpointRoomMatches[endpointID] = false
+      connectedEndpoints.remove(endpointID)
+      cancelPendingConnectionRequest(for: endpointID)
+      pendingOutgoingConnections.remove(endpointID)
+      audioController.handleEndpointDisconnected(endpointID)
+      removePeer(endpointID)
+      emit(event: "error", message: "Nearby peer has incompatible room audio settings: \(mismatch).")
+      disconnect(endpointID)
+      return true
+    }
+
     endpointRoomMatches[endpointID] = true
-    endpointAudioConfigs[endpointID] = parseAudioConfig(json)
+    endpointAudioConfigs[endpointID] = remoteAudioConfig
     let remoteName = (json["displayName"] as? String) ?? peerSessions[endpointID]?.displayName ?? "Nearby peer"
     upsertPeer(
       endpointID: endpointID,
       displayName: remoteName,
       isConnected: connectedEndpoints.contains(endpointID),
-      streamSampleRate: NearbyAudioConfig.defaultStreamSampleRate
+      streamSampleRate: agreedSampleRate(with: endpointID),
+      codec: agreedCodec(with: endpointID)
     )
     emit(
       event: "bytes_received",
@@ -814,7 +829,8 @@ private extension NearbyConnectionsBridge {
       extra: [
         "peerId": endpointID,
         "peerDisplayName": remoteName,
-        "audioSampleRate": NearbyAudioConfig.defaultStreamSampleRate
+        "audioSampleRate": agreedSampleRate(with: endpointID),
+        "codec": agreedCodec(with: endpointID)
       ]
     )
     return true
@@ -917,18 +933,34 @@ private extension NearbyConnectionsBridge {
   }
 
   struct NearbyAudioConfig {
+    let codec: String
+    let supportedCodecs: [String]
     let preferredSampleRate: Int
     let supportedSampleRates: [Int]
+    let frameDurationMs: Int
+    let transportVersion: Int
 
     init(
+      codec: String = Self.defaultCodec,
+      supportedCodecs: [String] = [Self.defaultCodec],
       preferredSampleRate: Int = Self.defaultStreamSampleRate,
-      supportedSampleRates: [Int] = [Self.defaultStreamSampleRate]
+      supportedSampleRates: [Int] = [Self.defaultStreamSampleRate],
+      frameDurationMs: Int = Self.defaultFrameDurationMs,
+      transportVersion: Int = Self.currentTransportVersion
     ) {
+      self.codec = codec.isEmpty ? Self.defaultCodec : codec
+      self.supportedCodecs = supportedCodecs.isEmpty ? [Self.defaultCodec] : supportedCodecs
       self.supportedSampleRates = supportedSampleRates.isEmpty ? [Self.defaultStreamSampleRate] : supportedSampleRates
       self.preferredSampleRate = preferredSampleRate
+      self.frameDurationMs = max(1, frameDurationMs)
+      self.transportVersion = max(1, transportVersion)
     }
 
+    static let defaultCodec = "pcm16"
     static let defaultStreamSampleRate = 16_000
+    static let defaultFrameDurationMs = 20
+    static let currentTransportVersion = 1
+    static let defaultConfig = NearbyAudioConfig()
   }
 
   struct PeerSession {
@@ -937,24 +969,106 @@ private extension NearbyConnectionsBridge {
     var isConnected: Bool
     var isSpeaking: Bool
     let streamSampleRate: Int
+    let codec: String
   }
 
   func parseAudioConfig(_ json: [String: Any]) -> NearbyAudioConfig {
+    let supportedCodecs =
+      (json["supportedCodecs"] as? [String])?.filter { !$0.isEmpty }
+      ?? (json["supportedCodecs"] as? [NSString])?.map { $0 as String }.filter { !$0.isEmpty }
+      ?? []
+    let supportedRates =
+      (json["supportedSampleRates"] as? [Int])?.filter { $0 > 0 }
+      ?? (json["supportedSampleRates"] as? [NSNumber])?.map(\.intValue).filter { $0 > 0 }
+      ?? []
     NearbyAudioConfig(
-      preferredSampleRate: NearbyAudioConfig.defaultStreamSampleRate,
-      supportedSampleRates: [NearbyAudioConfig.defaultStreamSampleRate]
+      codec: (json["preferredCodec"] as? String) ?? (json["codec"] as? String) ?? NearbyAudioConfig.defaultCodec,
+      supportedCodecs: supportedCodecs,
+      preferredSampleRate: (json["preferredSampleRate"] as? Int) ?? NearbyAudioConfig.defaultStreamSampleRate,
+      supportedSampleRates: supportedRates,
+      frameDurationMs: (json["frameDurationMs"] as? Int) ?? NearbyAudioConfig.defaultFrameDurationMs,
+      transportVersion: (json["transportVersion"] as? Int) ?? NearbyAudioConfig.currentTransportVersion
     )
   }
 
   func buildLocalAudioConfig() -> NearbyAudioConfig {
-    NearbyAudioConfig(
-      preferredSampleRate: NearbyAudioConfig.defaultStreamSampleRate,
-      supportedSampleRates: [NearbyAudioConfig.defaultStreamSampleRate]
+    localAudioConfig
+  }
+
+  func audioConfigMismatchReason(_ remoteConfig: NearbyAudioConfig) -> String? {
+    if remoteConfig.transportVersion != localAudioConfig.transportVersion {
+      return "transport v\(remoteConfig.transportVersion) does not match room transport v\(localAudioConfig.transportVersion)"
+    }
+    if remoteConfig.codec != localAudioConfig.codec {
+      return "codec \(remoteConfig.codec) does not match room codec \(localAudioConfig.codec)"
+    }
+    if remoteConfig.preferredSampleRate != localAudioConfig.preferredSampleRate {
+      return "sample rate \(remoteConfig.preferredSampleRate) does not match room rate \(localAudioConfig.preferredSampleRate)"
+    }
+    if remoteConfig.frameDurationMs != localAudioConfig.frameDurationMs {
+      return "frame duration \(remoteConfig.frameDurationMs)ms does not match room frame duration \(localAudioConfig.frameDurationMs)ms"
+    }
+    return nil
+  }
+
+  func agreedSampleRate(with endpointID: EndpointID) -> Int {
+    // Keep one transport format per room until codec negotiation is fully room-wide.
+    localAudioConfig.preferredSampleRate
+  }
+
+  func agreedCodec(with endpointID: EndpointID) -> String {
+    // Avoid per-peer codec drift in the live transport. The local room profile
+    // defines the active transport until Opus is reintroduced as a true room mode.
+    localAudioConfig.codec
+  }
+
+  func makeAudioController() -> NearbyAudioController {
+    NearbyAudioController(
+      streamSampleRate: Double(localAudioConfig.preferredSampleRate),
+      codecForEndpoint: { [weak self] endpointID in
+        self?.agreedCodec(with: endpointID) ?? NearbyAudioConfig.defaultCodec
+      },
+      prepareAudioSession: { [weak self] in
+        guard let self else { return }
+        try self.commsSessionManager.prepareForVoiceAudio()
+      },
+      deactivateAudioSession: { [weak self] in
+        self?.commsSessionManager.deactivateVoiceAudio()
+      },
+      onError: { [weak self] message in
+        DispatchQueue.main.async {
+          self?.emit(event: "error", message: message)
+        }
+      },
+      onTransmitStateChanged: { [weak self] isTransmitting, message in
+        DispatchQueue.main.async {
+          guard let self else { return }
+          self.syncOSAudioState()
+          self.emit(
+            event: "transmit_state",
+            message: message,
+            extra: [
+              "isTransmitting": isTransmitting,
+              "audioSampleRate": self.localAudioConfig.preferredSampleRate,
+              "codec": self.localAudioConfig.codec,
+            ]
+          )
+        }
+      },
+      onPeerSpeakingChanged: { [weak self] endpointID, isSpeaking in
+        DispatchQueue.main.async {
+          self?.updatePeerSpeaking(endpointID, isSpeaking: isSpeaking)
+        }
+      }
     )
   }
 }
 
 private final class NearbyAudioController {
+  private let streamSampleRate: Double
+  private let frameSamples: Int
+  private let frameByteCount: Int
+  private let codecForEndpoint: (EndpointID) -> String
   private let prepareAudioSession: () throws -> Void
   private let deactivateAudioSession: () -> Void
   private let onError: (String) -> Void
@@ -968,15 +1082,15 @@ private final class NearbyAudioController {
   private let receiveQueue = DispatchQueue(label: "nakama_sync.nearby.audio.rx")
   private let playbackQueue = DispatchQueue(label: "nakama_sync.nearby.audio.playback")
   private let audioGraphQueue = DispatchQueue(label: "nakama_sync.nearby.audio.graph")
-  private let streamSampleRate = Double(16_000)
-  private let frameSamples = 320
-  private let frameByteCount = 640
   private let voiceActivationProcessor = VoiceActivationProcessor(
     frameMillis: 20,
     sensitivity: 0.55
   )
 
   private var captureConverter: AVAudioConverter?
+  private var captureInputFormatDescription: String?
+  private var opusEncoder: AVAudioConverter?
+  private var opusDecoderCache = [String: AVAudioConverter]()
   private var activeConnectionManager: ConnectionManager?
   private var outboundStreams = [EndpointID: BoundOutputStream]()
   private var transmitEndpointIDs = Set<EndpointID>()
@@ -1015,13 +1129,25 @@ private final class NearbyAudioController {
     channels: 1
   )
 
+  private lazy var opusFormat: AVAudioFormat? = Self.makeOpusFormat(
+    sampleRate: streamSampleRate,
+    channels: 1,
+    framesPerPacket: frameSamples
+  )
+
   init(
+    streamSampleRate: Double,
+    codecForEndpoint: @escaping (EndpointID) -> String,
     prepareAudioSession: @escaping () throws -> Void,
     deactivateAudioSession: @escaping () -> Void,
     onError: @escaping (String) -> Void,
     onTransmitStateChanged: @escaping (Bool, String) -> Void,
     onPeerSpeakingChanged: @escaping (EndpointID, Bool) -> Void
   ) {
+    self.streamSampleRate = streamSampleRate
+    self.frameSamples = Int((streamSampleRate * 0.02).rounded())
+    self.frameByteCount = self.frameSamples * MemoryLayout<Int16>.stride
+    self.codecForEndpoint = codecForEndpoint
     self.prepareAudioSession = prepareAudioSession
     self.deactivateAudioSession = deactivateAudioSession
     self.onError = onError
@@ -1094,6 +1220,7 @@ private final class NearbyAudioController {
       if !isVoiceActivationEnabled {
         transmitEndpointIDs.removeAll()
         captureConverter = nil
+        opusEncoder = nil
       }
       return streams
     }
@@ -1124,10 +1251,14 @@ private final class NearbyAudioController {
         bufferSize: frameByteCount,
         queue: receiveQueue,
         onAudioData: { [weak self] data in
-          self?.withStateLock {
-            self?.inboundBuffers[endpointID]?.append(data)
-            if let isSpeaking = self?.inboundSpeechActivity[endpointID]?.process(data) {
-              self?.onPeerSpeakingChanged(endpointID, isSpeaking)
+          guard let self else { return }
+          let codec = self.codecForEndpoint(endpointID)
+          let decodedData = self.decodeIncomingPacket(data, codec: codec, endpointID: endpointID)
+          guard let decodedData else { return }
+          self.withStateLock {
+            self.inboundBuffers[endpointID]?.append(decodedData)
+            if let isSpeaking = self.inboundSpeechActivity[endpointID]?.process(decodedData) {
+              self.onPeerSpeakingChanged(endpointID, isSpeaking)
             }
           }
         },
@@ -1259,19 +1390,23 @@ private final class NearbyAudioController {
       guard let captureFormat else {
         throw NearbyAudioError.captureFormatCreationFailed
       }
-      let needsConverter = withStateLock { captureConverter == nil }
+      let formatDescription = Self.describeAudioFormat(inputFormat)
+      let needsConverter = withStateLock {
+        captureConverter == nil || captureInputFormatDescription != formatDescription
+      }
       if needsConverter {
         guard let converter = AVAudioConverter(from: inputFormat, to: captureFormat) else {
           throw NearbyAudioError.converterCreationFailed
         }
         withStateLock {
           captureConverter = converter
+          captureInputFormatDescription = formatDescription
         }
         inputNode.removeTap(onBus: 0)
         inputNode.installTap(
           onBus: 0,
           bufferSize: AVAudioFrameCount(frameSamples),
-          format: inputFormat
+          format: nil
         ) { [weak self] buffer, _ in
           self?.writeCapturedAudio(buffer)
         }
@@ -1438,7 +1573,11 @@ private final class NearbyAudioController {
       Array(outboundStreams.map { ($0.key, $0.value) })
     }
     for (endpointID, boundStream) in streams {
-      let succeeded = writeToOutputStream(data, stream: boundStream.output)
+      let codec = codecForEndpoint(endpointID)
+      guard let payload = encodeOutgoingFrame(data, codec: codec) else {
+        continue
+      }
+      let succeeded = writeToOutputStream(payload, stream: boundStream.output)
       if !succeeded {
         removeOutboundStream(endpointID)
       }
@@ -1477,16 +1616,18 @@ private final class NearbyAudioController {
   }
 
   private func writeToOutputStream(_ data: Data, stream: OutputStream) -> Bool {
-    data.withUnsafeBytes { rawBuffer in
+    var packetLength = UInt32(data.count).bigEndian
+    let packet = Data(bytes: &packetLength, count: MemoryLayout<UInt32>.size) + data
+    return packet.withUnsafeBytes { rawBuffer in
       guard let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
         return false
       }
 
       var totalWritten = 0
-      while totalWritten < data.count {
+      while totalWritten < packet.count {
         let bytesWritten = stream.write(
           baseAddress.advanced(by: totalWritten),
-          maxLength: data.count - totalWritten
+          maxLength: packet.count - totalWritten
         )
         if bytesWritten <= 0 {
           return false
@@ -1606,6 +1747,9 @@ private final class NearbyAudioController {
       let timer = mixerTimer
       mixerTimer = nil
       captureConverter = nil
+      captureInputFormatDescription = nil
+      opusEncoder = nil
+      opusDecoderCache.removeAll()
       return timer
     }
     timer?.cancel()
@@ -1652,6 +1796,158 @@ private final class NearbyAudioController {
       channels: channels,
       interleaved: false
     )
+  }
+
+  private static func makeOpusFormat(
+    sampleRate: Double,
+    channels: AVAudioChannelCount,
+    framesPerPacket: Int
+  ) -> AVAudioFormat? {
+    var streamDescription = AudioStreamBasicDescription(
+      mSampleRate: sampleRate,
+      mFormatID: kAudioFormatOpus,
+      mFormatFlags: 0,
+      mBytesPerPacket: 0,
+      mFramesPerPacket: UInt32(framesPerPacket),
+      mBytesPerFrame: 0,
+      mChannelsPerFrame: channels,
+      mBitsPerChannel: 0,
+      mReserved: 0
+    )
+    return AVAudioFormat(streamDescription: &streamDescription)
+  }
+
+  private static func describeAudioFormat(_ format: AVAudioFormat) -> String {
+    "\(format.commonFormat.rawValue)|\(format.sampleRate)|\(format.channelCount)|\(format.isInterleaved)"
+  }
+
+  private func encodeOutgoingFrame(_ data: Data, codec: String) -> Data? {
+    guard codec == "opus" else {
+      return data
+    }
+    return encodeOpusFrame(data)
+  }
+
+  private func decodeIncomingPacket(_ data: Data, codec: String, endpointID: EndpointID) -> Data? {
+    guard codec == "opus" else {
+      return data
+    }
+    return decodeOpusPacket(data, endpointID: endpointID)
+  }
+
+  private func encodeOpusFrame(_ data: Data) -> Data? {
+    guard
+      let captureFormat,
+      let opusFormat,
+      let pcmBuffer = AVAudioPCMBuffer(
+        pcmFormat: captureFormat,
+        frameCapacity: AVAudioFrameCount(frameSamples)
+      ),
+      let channelData = pcmBuffer.int16ChannelData
+    else {
+      return nil
+    }
+    pcmBuffer.frameLength = AVAudioFrameCount(frameSamples)
+    data.copyBytes(
+      to: UnsafeMutableBufferPointer(
+        start: channelData[0],
+        count: min(frameSamples, data.count / MemoryLayout<Int16>.stride)
+      )
+    )
+
+    if opusEncoder == nil {
+      opusEncoder = AVAudioConverter(from: captureFormat, to: opusFormat)
+    }
+    guard let opusEncoder else { return nil }
+    let maximumPacketSize = max(Int(opusEncoder.maximumOutputPacketSize), 512)
+    let compressedBuffer = AVAudioCompressedBuffer(
+      format: opusFormat,
+      packetCapacity: 1,
+      maximumPacketSize: maximumPacketSize
+    )
+
+    var error: NSError?
+    var hasProvidedInput = false
+    let status = opusEncoder.convert(to: compressedBuffer, error: &error) { _, outStatus in
+      if hasProvidedInput {
+        outStatus.pointee = .noDataNow
+        return nil
+      }
+      hasProvidedInput = true
+      outStatus.pointee = .haveData
+      return pcmBuffer
+    }
+    guard error == nil, status != .error, compressedBuffer.byteLength > 0 else {
+      onError("Opus encode failed on iOS: \(error?.localizedDescription ?? "converter returned no packets")")
+      return nil
+    }
+    return Data(
+      bytes: compressedBuffer.data.assumingMemoryBound(to: UInt8.self),
+      count: Int(compressedBuffer.byteLength)
+    )
+  }
+
+  private func decodeOpusPacket(_ data: Data, endpointID: EndpointID) -> Data? {
+    guard
+      let captureFormat,
+      let opusFormat
+    else {
+      return nil
+    }
+
+    let cacheKey = endpointID
+    if opusDecoderCache[cacheKey] == nil {
+      opusDecoderCache[cacheKey] = AVAudioConverter(from: opusFormat, to: captureFormat)
+    }
+    guard let decoder = opusDecoderCache[cacheKey] else { return nil }
+    guard
+      let outputBuffer = AVAudioPCMBuffer(
+        pcmFormat: captureFormat,
+        frameCapacity: AVAudioFrameCount(frameSamples * 2)
+      )
+    else {
+      return nil
+    }
+    let compressedBuffer = AVAudioCompressedBuffer(
+      format: opusFormat,
+      packetCapacity: 1,
+      maximumPacketSize: data.count
+    )
+
+    compressedBuffer.byteLength = UInt32(data.count)
+    compressedBuffer.packetCount = 1
+    if let packetDescriptions = compressedBuffer.packetDescriptions {
+      packetDescriptions.pointee.mDataByteSize = UInt32(data.count)
+      packetDescriptions.pointee.mStartOffset = 0
+      packetDescriptions.pointee.mVariableFramesInPacket = UInt32(frameSamples)
+    }
+    data.copyBytes(
+      to: UnsafeMutableBufferPointer(
+        start: compressedBuffer.data.assumingMemoryBound(to: UInt8.self),
+        count: data.count
+      )
+    )
+
+    var error: NSError?
+    var hasProvidedInput = false
+    let status = decoder.convert(to: outputBuffer, error: &error) { _, outStatus in
+      if hasProvidedInput {
+        outStatus.pointee = .noDataNow
+        return nil
+      }
+      hasProvidedInput = true
+      outStatus.pointee = .haveData
+      return compressedBuffer
+    }
+    guard error == nil, status != .error, outputBuffer.frameLength > 0 else {
+      onError("Opus decode failed on iOS: \(error?.localizedDescription ?? "converter returned no PCM frames")")
+      return nil
+    }
+    guard let channelData = outputBuffer.int16ChannelData else {
+      return nil
+    }
+    let byteCount = Int(outputBuffer.frameLength) * MemoryLayout<Int16>.stride
+    return Data(bytes: channelData[0], count: byteCount)
   }
 }
 
@@ -1709,6 +2005,7 @@ private final class IncomingAudioStreamReader {
   private let onAudioData: (Data) -> Void
   private let onFinished: () -> Void
   private let stateLock = NSLock()
+  private var pendingData = Data()
   private var stopped = false
 
   init(
@@ -1751,7 +2048,7 @@ private final class IncomingAudioStreamReader {
     while !isStopped {
       let bytesRead = stream.read(buffer, maxLength: bufferSize)
       if bytesRead > 0 {
-        onAudioData(Data(bytes: buffer, count: bytesRead))
+        appendIncomingData(Data(bytes: buffer, count: bytesRead))
         continue
       }
 
@@ -1767,6 +2064,32 @@ private final class IncomingAudioStreamReader {
     stateLock.lock()
     defer { stateLock.unlock() }
     return stopped
+  }
+
+  private func appendIncomingData(_ chunk: Data) {
+    stateLock.lock()
+    pendingData.append(chunk)
+    var packets = [Data]()
+    while pendingData.count >= MemoryLayout<UInt32>.size {
+      let packetLength =
+        (Int(pendingData[pendingData.startIndex]) << 24)
+        | (Int(pendingData[pendingData.startIndex + 1]) << 16)
+        | (Int(pendingData[pendingData.startIndex + 2]) << 8)
+        | Int(pendingData[pendingData.startIndex + 3])
+      if packetLength <= 0 || packetLength > 64_000 {
+        pendingData.removeAll(keepingCapacity: false)
+        break
+      }
+      let totalLength = MemoryLayout<UInt32>.size + packetLength
+      if pendingData.count < totalLength {
+        break
+      }
+      let packet = pendingData.subdata(in: MemoryLayout<UInt32>.size..<totalLength)
+      packets.append(packet)
+      pendingData.removeFirst(totalLength)
+    }
+    stateLock.unlock()
+    packets.forEach(onAudioData)
   }
 }
 

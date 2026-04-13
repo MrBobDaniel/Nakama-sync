@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:nakama_sync/core/audio/audio_engine.dart';
 import 'package:nakama_sync/core/config/app_config.dart';
+import 'package:nakama_sync/features/comms/comms_audio_profile.dart';
 import 'package:nakama_sync/features/comms/comms_bloc.dart';
 import 'package:nakama_sync/features/comms/comms_event.dart';
 import 'package:nakama_sync/features/comms/data/repositories/comms_transport_service.dart';
@@ -24,6 +25,7 @@ class FakeSong extends Fake implements Song {}
 void main() {
   setUpAll(() {
     registerFallbackValue(FakeSong());
+    registerFallbackValue(CommsAudioProfile.preferredDefault);
   });
 
   testWidgets('renders the music library shell', (WidgetTester tester) async {
@@ -166,7 +168,9 @@ void main() {
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
     when(() => transportService.dispose()).thenAnswer((_) async {});
-    when(() => transportService.initialize(any())).thenAnswer((_) async {});
+    when(
+      () => transportService.initialize(any(), any()),
+    ).thenAnswer((_) async {});
     when(
       () => transportService.setPushToTalkActive(any()),
     ).thenAnswer((_) async {});
@@ -230,7 +234,9 @@ void main() {
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
     when(() => transportService.dispose()).thenAnswer((_) async {});
-    when(() => transportService.initialize(any())).thenAnswer((_) async {});
+    when(
+      () => transportService.initialize(any(), any()),
+    ).thenAnswer((_) async {});
     when(
       () => transportService.setPushToTalkActive(any()),
     ).thenAnswer((_) async {});
@@ -307,7 +313,9 @@ void main() {
       when(() => audioEngine.dispose()).thenAnswer((_) async {});
       when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
       when(() => transportService.dispose()).thenAnswer((_) async {});
-      when(() => transportService.initialize(any())).thenAnswer((_) async {});
+      when(
+        () => transportService.initialize(any(), any()),
+      ).thenAnswer((_) async {});
       when(
         () => transportService.setPushToTalkActive(any()),
       ).thenAnswer((_) async {});
@@ -384,7 +392,9 @@ void main() {
     when(() => audioEngine.dispose()).thenAnswer((_) async {});
     when(() => audioEngine.setVolume(any())).thenAnswer((_) async {});
     when(() => transportService.dispose()).thenAnswer((_) async {});
-    when(() => transportService.initialize(any())).thenAnswer((_) async {});
+    when(
+      () => transportService.initialize(any(), any()),
+    ).thenAnswer((_) async {});
     when(
       () => transportService.setPushToTalkActive(any()),
     ).thenAnswer((_) async {});

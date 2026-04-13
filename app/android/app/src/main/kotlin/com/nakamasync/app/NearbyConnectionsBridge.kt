@@ -11,6 +11,8 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.MediaCodec
+import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
 import android.media.audiofx.AutomaticGainControl
@@ -69,21 +71,11 @@ class NearbyConnectionsBridge(
     private val peerSessions = ConcurrentHashMap<String, PeerSession>()
     private val pendingOutgoingConnections = ConcurrentHashMap.newKeySet<String>()
     private val pendingConnectionRequests = ConcurrentHashMap<String, Runnable>()
-    private val incomingAudioMixer = IncomingAudioMixer(
-        context = context,
-        sampleRate = DEFAULT_STREAM_SAMPLE_RATE,
-        communicationAudioController = communicationAudioController,
-        onPeerSpeakingChanged = { endpointId, isSpeaking ->
-            updatePeerSpeaking(endpointId, isSpeaking)
-        },
-        onError = { message ->
-            emit("error", message)
-        },
-    )
-
     private var eventSink: EventChannel.EventSink? = null
     private var roomId: String? = null
     private var displayName: String = "Nakama Sync Android"
+    private var localAudioConfig = NearbyAudioConfig()
+    private var incomingAudioMixer = createIncomingAudioMixer()
     private var outgoingAudioFanout: OutgoingAudioFanout? = null
     private var pendingStartSessionResult: MethodChannel.Result? = null
     private var isDiscovering = false
@@ -131,6 +123,8 @@ class NearbyConnectionsBridge(
 
                 roomId = normalizedRoomId
                 displayName = normalizedDisplayName
+                val arguments = call.arguments as? Map<*, *> ?: emptyMap<String, Any?>()
+                localAudioConfig = parseAudioConfig(JSONObject(arguments))
                 startSession(result)
             }
 
@@ -228,6 +222,7 @@ class NearbyConnectionsBridge(
         stopSession()
         roomId = requestedRoomId
         displayName = requestedDisplayName
+        incomingAudioMixer = createIncomingAudioMixer()
 
         val osSessionResult = CommsSessionManager.startSession(
             context = context,
@@ -283,7 +278,8 @@ class NearbyConnectionsBridge(
             val fanout = outgoingAudioFanout ?: OutgoingAudioFanout(
                 context = context,
                 connectionsClient = connectionsClient,
-                sampleRate = DEFAULT_STREAM_SAMPLE_RATE,
+                sampleRate = localAudioConfig.preferredSampleRate,
+                codecForEndpoint = { endpointId -> agreedCodec(endpointId) },
                 communicationAudioController = communicationAudioController,
                 onTransmitStateChanged = { isTransmitting, message ->
                     emit(
@@ -291,7 +287,8 @@ class NearbyConnectionsBridge(
                         message,
                         mapOf(
                             "isTransmitting" to isTransmitting,
-                            "audioSampleRate" to DEFAULT_STREAM_SAMPLE_RATE,
+                            "audioSampleRate" to localAudioConfig.preferredSampleRate,
+                            "codec" to localAudioConfig.codec,
                         ),
                     )
                 },
@@ -385,6 +382,7 @@ class NearbyConnectionsBridge(
         outgoingAudioFanout?.stop()
         outgoingAudioFanout = null
         incomingAudioMixer.stopAll()
+        incomingAudioMixer = createIncomingAudioMixer()
         activeEndpoints.clear()
         discoveredEndpoints.clear()
         endpointRoomMatches.clear()
@@ -402,6 +400,7 @@ class NearbyConnectionsBridge(
         connectionsClient.stopDiscovery()
         CommsSessionManager.stopSession(context)
         roomId = null
+        localAudioConfig = NearbyAudioConfig()
     }
 
     private fun isPlayServicesAvailable(): Boolean {
@@ -440,6 +439,10 @@ class NearbyConnectionsBridge(
             "isTransmitting" to (outgoingAudioFanout?.isTransmittingActive() == true),
             "transmitMode" to if (isVoiceActivationEnabled) "voice_activated" else "push_to_talk",
             "isVoiceActivationArmed" to (outgoingAudioFanout?.isVoiceActivationArmed() == true),
+            "audioSampleRate" to localAudioConfig.preferredSampleRate,
+            "codec" to localAudioConfig.codec,
+            "frameDurationMs" to localAudioConfig.frameDurationMs,
+            "transportVersion" to localAudioConfig.transportVersion,
             "peers" to peerSessions.values
                 .sortedWith(compareBy<PeerSession>({ !it.isConnected }, { it.displayName.lowercase() }))
                 .map { peer ->
@@ -449,6 +452,7 @@ class NearbyConnectionsBridge(
                         "isConnected" to peer.isConnected,
                         "isSpeaking" to peer.isSpeaking,
                         "streamSampleRate" to peer.streamSampleRate,
+                        "codec" to peer.codec,
                     )
                 },
         )
@@ -481,6 +485,7 @@ class NearbyConnectionsBridge(
         isConnected: Boolean? = null,
         isSpeaking: Boolean? = null,
         streamSampleRate: Int? = null,
+        codec: String? = null,
     ) {
         val existing = peerSessions[endpointId]
         peerSessions[endpointId] = PeerSession(
@@ -490,7 +495,8 @@ class NearbyConnectionsBridge(
                 ?: "Nearby peer",
             isConnected = isConnected ?: existing?.isConnected ?: false,
             isSpeaking = isSpeaking ?: existing?.isSpeaking ?: false,
-            streamSampleRate = streamSampleRate ?: existing?.streamSampleRate ?: DEFAULT_STREAM_SAMPLE_RATE,
+            streamSampleRate = streamSampleRate ?: existing?.streamSampleRate ?: localAudioConfig.preferredSampleRate,
+            codec = codec ?: existing?.codec ?: localAudioConfig.codec,
         )
     }
 
@@ -543,7 +549,8 @@ class NearbyConnectionsBridge(
         val fanout = outgoingAudioFanout ?: OutgoingAudioFanout(
             context = context,
             connectionsClient = connectionsClient,
-            sampleRate = DEFAULT_STREAM_SAMPLE_RATE,
+            sampleRate = localAudioConfig.preferredSampleRate,
+            codecForEndpoint = { endpointId -> agreedCodec(endpointId) },
             communicationAudioController = communicationAudioController,
             onTransmitStateChanged = { isTransmitting, message ->
                 emit(
@@ -551,7 +558,8 @@ class NearbyConnectionsBridge(
                     message,
                     mapOf(
                         "isTransmitting" to isTransmitting,
-                        "audioSampleRate" to DEFAULT_STREAM_SAMPLE_RATE,
+                        "audioSampleRate" to localAudioConfig.preferredSampleRate,
+                        "codec" to localAudioConfig.codec,
                     ),
                 )
                 if (!isTransmitting) {
@@ -597,13 +605,17 @@ class NearbyConnectionsBridge(
                 return
             }
 
-            val remoteEndpoint = parseEndpointInfo(info.endpointInfo)
-            endpointAudioConfigs[endpointId] = remoteEndpoint.audioConfig
-            if (!roomMatches(remoteEndpoint.roomId)) {
-                return
-            }
+        val remoteEndpoint = parseEndpointInfo(info.endpointInfo)
+        endpointAudioConfigs[endpointId] = remoteEndpoint.audioConfig
+        if (!roomMatches(remoteEndpoint.roomId)) {
+            return
+        }
+        audioConfigMismatchReason(remoteEndpoint.audioConfig)?.let { mismatch ->
+            emit("peer_incompatible", "Ignoring nearby peer with incompatible audio mode: $mismatch.")
+            return
+        }
 
-            val remoteName = remoteEndpoint.displayName ?: info.endpointName
+        val remoteName = remoteEndpoint.displayName ?: info.endpointName
             upsertPeer(endpointId, remoteName)
             emit("peer_discovered", "Found nearby peer ${remoteName.ifBlank { "in this room" }}.")
             scheduleConnectionRequest(endpointId, remoteName)
@@ -639,6 +651,12 @@ class NearbyConnectionsBridge(
                 emit("error", "Ignoring Nearby peer from a different room.")
                 return
             }
+            audioConfigMismatchReason(remoteEndpoint.audioConfig)?.let { mismatch ->
+                endpointRoomMatches[endpointId] = false
+                connectionsClient.rejectConnection(endpointId)
+                emit("error", "Rejecting Nearby peer with incompatible audio mode: $mismatch.")
+                return
+            }
 
             val remoteName = remoteEndpoint.displayName ?: info.endpointName
             upsertPeer(endpointId, remoteName)
@@ -660,7 +678,8 @@ class NearbyConnectionsBridge(
                         endpointId,
                         remoteName,
                         isConnected = true,
-                        streamSampleRate = DEFAULT_STREAM_SAMPLE_RATE,
+                        streamSampleRate = agreedSampleRate(endpointId),
+                        codec = agreedCodec(endpointId),
                     )
                     sendHandshake(endpointId)
                     if (isPushToTalkActive) {
@@ -737,8 +756,13 @@ class NearbyConnectionsBridge(
             .put("type", type)
             .put("roomId", roomId)
             .put("displayName", displayName)
+            .put("codec", localAudioConfig.codec)
+            .put("preferredCodec", localAudioConfig.codec)
+            .put("supportedCodecs", JSONArray(localAudioConfig.supportedCodecs))
             .put("preferredSampleRate", localAudioConfig.preferredSampleRate)
             .put("supportedSampleRates", JSONArray(localAudioConfig.supportedSampleRates))
+            .put("frameDurationMs", localAudioConfig.frameDurationMs)
+            .put("transportVersion", localAudioConfig.transportVersion)
             .toString()
             .toByteArray(Charsets.UTF_8)
 
@@ -784,14 +808,27 @@ class NearbyConnectionsBridge(
             return
         }
 
+        val remoteAudioConfig = parseAudioConfig(json)
+        audioConfigMismatchReason(remoteAudioConfig)?.let { mismatch ->
+            endpointRoomMatches[endpointId] = false
+            activeEndpoints.remove(endpointId)
+            outgoingAudioFanout?.removeEndpoint(endpointId)
+            incomingAudioMixer.stopEndpoint(endpointId)
+            connectionsClient.disconnectFromEndpoint(endpointId)
+            removePeer(endpointId)
+            emit("error", "Nearby peer has incompatible room audio settings: $mismatch.")
+            return
+        }
+
         val remoteName = json.optString("displayName").ifBlank { peerSessions[endpointId]?.displayName ?: "Nearby peer" }
         endpointRoomMatches[endpointId] = true
-        endpointAudioConfigs[endpointId] = parseAudioConfig(json)
+        endpointAudioConfigs[endpointId] = remoteAudioConfig
         upsertPeer(
             endpointId,
             remoteName,
             isConnected = activeEndpoints.contains(endpointId),
-            streamSampleRate = DEFAULT_STREAM_SAMPLE_RATE,
+            streamSampleRate = agreedSampleRate(endpointId),
+            codec = agreedCodec(endpointId),
         )
         emit(
             "bytes_received",
@@ -799,7 +836,8 @@ class NearbyConnectionsBridge(
             mapOf(
                 "peerId" to endpointId,
                 "peerDisplayName" to remoteName,
-                "audioSampleRate" to DEFAULT_STREAM_SAMPLE_RATE,
+                "audioSampleRate" to agreedSampleRate(endpointId),
+                "codec" to agreedCodec(endpointId),
             ),
         )
     }
@@ -809,8 +847,13 @@ class NearbyConnectionsBridge(
         return JSONObject()
             .put("roomId", roomId)
             .put("displayName", displayName)
+            .put("codec", localAudioConfig.codec)
+            .put("preferredCodec", localAudioConfig.codec)
+            .put("supportedCodecs", JSONArray(localAudioConfig.supportedCodecs))
             .put("preferredSampleRate", localAudioConfig.preferredSampleRate)
             .put("supportedSampleRates", JSONArray(localAudioConfig.supportedSampleRates))
+            .put("frameDurationMs", localAudioConfig.frameDurationMs)
+            .put("transportVersion", localAudioConfig.transportVersion)
             .toString()
             .toByteArray(Charsets.UTF_8)
     }
@@ -838,6 +881,16 @@ class NearbyConnectionsBridge(
     }
 
     private fun parseAudioConfig(json: JSONObject): NearbyAudioConfig {
+        val supportedCodecsJson = json.optJSONArray("supportedCodecs")
+        val supportedCodecs = mutableListOf<String>()
+        if (supportedCodecsJson != null) {
+            for (index in 0 until supportedCodecsJson.length()) {
+                val codec = supportedCodecsJson.optString(index)
+                if (codec.isNotBlank()) {
+                    supportedCodecs.add(codec)
+                }
+            }
+        }
         val supportedRatesJson = json.optJSONArray("supportedSampleRates")
         val supportedSampleRates = mutableListOf<Int>()
         if (supportedRatesJson != null) {
@@ -850,15 +903,58 @@ class NearbyConnectionsBridge(
         }
 
         return NearbyAudioConfig(
+            codec = json.optString("preferredCodec").ifBlank {
+                json.optString("codec").ifBlank { DEFAULT_CODEC }
+            },
+            supportedCodecs = supportedCodecs.ifEmpty { listOf(DEFAULT_CODEC) },
             preferredSampleRate = json.optInt("preferredSampleRate", DEFAULT_STREAM_SAMPLE_RATE),
             supportedSampleRates = supportedSampleRates.ifEmpty { listOf(DEFAULT_STREAM_SAMPLE_RATE) },
+            frameDurationMs = json.optInt("frameDurationMs", STREAM_CHUNK_MILLIS).coerceAtLeast(1),
+            transportVersion = json.optInt("transportVersion", CURRENT_TRANSPORT_VERSION).coerceAtLeast(1),
         )
     }
 
     private fun buildLocalAudioConfig(): NearbyAudioConfig {
-        return NearbyAudioConfig(
-            preferredSampleRate = DEFAULT_STREAM_SAMPLE_RATE,
-            supportedSampleRates = listOf(DEFAULT_STREAM_SAMPLE_RATE),
+        return localAudioConfig
+    }
+
+    private fun audioConfigMismatchReason(remoteConfig: NearbyAudioConfig): String? {
+        return when {
+            remoteConfig.transportVersion != localAudioConfig.transportVersion ->
+                "transport v${remoteConfig.transportVersion} does not match room transport v${localAudioConfig.transportVersion}"
+            remoteConfig.codec != localAudioConfig.codec ->
+                "codec ${remoteConfig.codec} does not match room codec ${localAudioConfig.codec}"
+            remoteConfig.preferredSampleRate != localAudioConfig.preferredSampleRate ->
+                "sample rate ${remoteConfig.preferredSampleRate} does not match room rate ${localAudioConfig.preferredSampleRate}"
+            remoteConfig.frameDurationMs != localAudioConfig.frameDurationMs ->
+                "frame duration ${remoteConfig.frameDurationMs}ms does not match room frame duration ${localAudioConfig.frameDurationMs}ms"
+            else -> null
+        }
+    }
+
+    private fun agreedSampleRate(endpointId: String): Int {
+        // Keep one transport format per room until codec negotiation is fully room-wide.
+        return localAudioConfig.preferredSampleRate
+    }
+
+    private fun agreedCodec(endpointId: String): String {
+        // Avoid per-peer codec drift in the live transport. The local room profile
+        // defines the active transport until Opus is reintroduced as a true room mode.
+        return localAudioConfig.codec
+    }
+
+    private fun createIncomingAudioMixer(): IncomingAudioMixer {
+        return IncomingAudioMixer(
+            context = context,
+            sampleRate = localAudioConfig.preferredSampleRate,
+            codecForEndpoint = { endpointId -> agreedCodec(endpointId) },
+            communicationAudioController = communicationAudioController,
+            onPeerSpeakingChanged = { endpointId, isSpeaking ->
+                updatePeerSpeaking(endpointId, isSpeaking)
+            },
+            onError = { message ->
+                emit("error", message)
+            },
         )
     }
 
@@ -1024,8 +1120,12 @@ class NearbyConnectionsBridge(
     )
 
     private data class NearbyAudioConfig(
+        val codec: String = DEFAULT_CODEC,
+        val supportedCodecs: List<String> = listOf(DEFAULT_CODEC),
         val preferredSampleRate: Int = DEFAULT_STREAM_SAMPLE_RATE,
         val supportedSampleRates: List<Int> = listOf(DEFAULT_STREAM_SAMPLE_RATE),
+        val frameDurationMs: Int = STREAM_CHUNK_MILLIS,
+        val transportVersion: Int = CURRENT_TRANSPORT_VERSION,
     )
 
     private data class PeerSession(
@@ -1034,6 +1134,7 @@ class NearbyConnectionsBridge(
         val isConnected: Boolean,
         val isSpeaking: Boolean,
         val streamSampleRate: Int,
+        val codec: String,
     )
 
     private class PeerPcmBuffer(
@@ -1103,6 +1204,7 @@ class NearbyConnectionsBridge(
     private class IncomingAudioMixer(
         private val context: Context,
         private val sampleRate: Int,
+        private val codecForEndpoint: (String) -> String,
         private val communicationAudioController: CommunicationAudioController,
         private val onPeerSpeakingChanged: (String, Boolean) -> Unit,
         private val onError: (String) -> Unit,
@@ -1110,6 +1212,7 @@ class NearbyConnectionsBridge(
         private val isRunning = AtomicBoolean(false)
         private val peerBuffers = ConcurrentHashMap<String, PeerPcmBuffer>()
         private val readerWorkers = ConcurrentHashMap<String, ReaderWorker>()
+        private val opusDecoders = ConcurrentHashMap<String, AndroidOpusDecoder>()
         private val mixerExecutor = Executors.newSingleThreadExecutor()
 
         fun registerStream(endpointId: String, inputStream: java.io.InputStream) {
@@ -1118,11 +1221,15 @@ class NearbyConnectionsBridge(
             val worker = ReaderWorker(
                 endpointId = endpointId,
                 inputStream = BufferedInputStream(inputStream),
-                frameBytes = frameBytes(),
+                readBufferSize = max(frameBytes(), PACKET_HEADER_BYTES),
                 onAudioData = { bytes ->
+                    val decodedBytes = decodePacket(endpointId, bytes, codecForEndpoint(endpointId))
+                    if (decodedBytes == null) {
+                        return@ReaderWorker
+                    }
                     val peerBuffer = peerBuffers[endpointId] ?: return@ReaderWorker
-                    peerBuffer.append(bytes)
-                    onPeerSpeakingChanged(endpointId, peerBuffer.updateSpeechActivity(bytes))
+                    peerBuffer.append(decodedBytes)
+                    onPeerSpeakingChanged(endpointId, peerBuffer.updateSpeechActivity(decodedBytes))
                 },
                 onFinished = {
                     stopEndpoint(endpointId)
@@ -1136,11 +1243,14 @@ class NearbyConnectionsBridge(
         fun stopEndpoint(endpointId: String) {
             readerWorkers.remove(endpointId)?.stop()
             peerBuffers.remove(endpointId)
+            opusDecoders.remove(endpointId)?.release()
             onPeerSpeakingChanged(endpointId, false)
         }
 
         fun stopAll() {
             readerWorkers.keys.toList().forEach(::stopEndpoint)
+            opusDecoders.values.forEach(AndroidOpusDecoder::release)
+            opusDecoders.clear()
             if (isRunning.compareAndSet(true, false)) {
                 communicationAudioController.releasePlayback()
             }
@@ -1167,7 +1277,7 @@ class NearbyConnectionsBridge(
                         }
                     }
                 } catch (error: Exception) {
-                    onError(error.localizedMessage ?: "Incoming audio mixer failed.")
+                    onError("Incoming audio mixer failed on Android: ${error.localizedMessage ?: "unknown error"}")
                 } finally {
                     try {
                         audioTrack.stop()
@@ -1212,26 +1322,42 @@ class NearbyConnectionsBridge(
             return sampleRate * PCM_BYTES_PER_SAMPLE * STREAM_CHUNK_MILLIS / 1_000
         }
 
+        private fun decodePacket(endpointId: String, packet: ByteArray, codec: String): ByteArray? {
+            if (codec != OPUS_CODEC) {
+                return packet
+            }
+            return try {
+                val decoder = opusDecoders.getOrPut(endpointId) {
+                    AndroidOpusDecoder(sampleRate)
+                }
+                decoder.decode(packet)
+            } catch (error: Exception) {
+                onError("Opus decode failed on Android: ${error.localizedMessage ?: "unknown error"}")
+                null
+            }
+        }
+
         private class ReaderWorker(
             private val endpointId: String,
             private val inputStream: BufferedInputStream,
-            private val frameBytes: Int,
+            private val readBufferSize: Int,
             private val onAudioData: (ByteArray) -> Unit,
             private val onFinished: () -> Unit,
         ) {
             private val running = AtomicBoolean(true)
             private val executor = Executors.newSingleThreadExecutor()
+            private val pendingBytes = ArrayDeque<Byte>()
 
             fun start() {
                 executor.execute {
-                    val buffer = ByteArray(frameBytes)
+                    val buffer = ByteArray(readBufferSize)
                     try {
                         while (running.get()) {
                             val count = inputStream.read(buffer)
                             if (count <= 0) {
                                 break
                             }
-                            onAudioData(buffer.copyOf(count))
+                            appendIncomingBytes(buffer, count)
                         }
                     } catch (_: Exception) {
                     } finally {
@@ -1251,6 +1377,35 @@ class NearbyConnectionsBridge(
                 }
                 executor.shutdownNow()
             }
+
+            private fun appendIncomingBytes(buffer: ByteArray, count: Int) {
+                repeat(count) { index ->
+                    pendingBytes.addLast(buffer[index])
+                }
+                while (pendingBytes.size >= PACKET_HEADER_BYTES) {
+                    val b0 = pendingBytes.removeFirst().toInt() and 0xFF
+                    val b1 = pendingBytes.removeFirst().toInt() and 0xFF
+                    val b2 = pendingBytes.removeFirst().toInt() and 0xFF
+                    val b3 = pendingBytes.removeFirst().toInt() and 0xFF
+                    val packetLength = (b0 shl 24) or (b1 shl 16) or (b2 shl 8) or b3
+                    if (packetLength <= 0 || packetLength > MAX_PACKET_BYTES) {
+                        pendingBytes.clear()
+                        break
+                    }
+                    if (pendingBytes.size < packetLength) {
+                        pendingBytes.addFirst(b3.toByte())
+                        pendingBytes.addFirst(b2.toByte())
+                        pendingBytes.addFirst(b1.toByte())
+                        pendingBytes.addFirst(b0.toByte())
+                        break
+                    }
+                    val packet = ByteArray(packetLength)
+                    repeat(packetLength) { packetIndex ->
+                        packet[packetIndex] = pendingBytes.removeFirst()
+                    }
+                    onAudioData(packet)
+                }
+            }
         }
     }
 
@@ -1258,6 +1413,7 @@ class NearbyConnectionsBridge(
         private val context: Context,
         private val connectionsClient: ConnectionsClient,
         private val sampleRate: Int,
+        private val codecForEndpoint: (String) -> String,
         private val communicationAudioController: CommunicationAudioController,
         private val onTransmitStateChanged: (Boolean, String) -> Unit,
         private val onVoiceActivationArmedChanged: (Boolean) -> Unit,
@@ -1277,6 +1433,7 @@ class NearbyConnectionsBridge(
         private var noiseSuppressor: NoiseSuppressor? = null
         private var acousticEchoCanceler: AcousticEchoCanceler? = null
         private var automaticGainControl: AutomaticGainControl? = null
+        private var opusEncoder: AndroidOpusEncoder? = null
         private var captureMode = CaptureMode.MANUAL
         private var isCurrentlyTransmitting = false
         private var isVoiceActivationArmed = false
@@ -1370,7 +1527,7 @@ class NearbyConnectionsBridge(
                         }
                     }
                 } catch (error: Exception) {
-                    onError(error.localizedMessage ?: "Outgoing audio capture failed.")
+                    onError("Outgoing audio capture failed on Android: ${error.localizedMessage ?: "unknown error"}")
                 } finally {
                     stop()
                 }
@@ -1435,6 +1592,8 @@ class NearbyConnectionsBridge(
             noiseSuppressor = null
             acousticEchoCanceler = null
             automaticGainControl = null
+            opusEncoder?.release()
+            opusEncoder = null
             audioRecord?.release()
             audioRecord = null
             communicationAudioController.releaseCapture()
@@ -1479,7 +1638,8 @@ class NearbyConnectionsBridge(
         private fun broadcastFrame(frame: ByteArray) {
             endpointOutputs.entries.toList().forEach { (endpointId, stream) ->
                 try {
-                    stream.write(frame)
+                    val encodedPayload = encodePayload(frame, codecForEndpoint(endpointId)) ?: return@forEach
+                    stream.write(encodePacket(encodedPayload))
                     stream.flush()
                 } catch (_: Exception) {
                     removeEndpoint(endpointId)
@@ -1511,7 +1671,8 @@ class NearbyConnectionsBridge(
             val frames = synchronized(lock) { preRollFrames.toList() }
             frames.forEach { frame ->
                 try {
-                    stream.write(frame)
+                    val encodedPayload = encodePayload(frame, codecForEndpoint(endpointId)) ?: return@forEach
+                    stream.write(encodePacket(encodedPayload))
                     stream.flush()
                 } catch (_: Exception) {
                     removeEndpoint(endpointId)
@@ -1583,6 +1744,161 @@ class NearbyConnectionsBridge(
         private enum class CaptureMode {
             MANUAL,
             VOICE_ACTIVATED,
+        }
+
+        private fun encodePacket(frame: ByteArray): ByteArray {
+            val packet = ByteArray(PACKET_HEADER_BYTES + frame.size)
+            val length = frame.size
+            packet[0] = ((length ushr 24) and 0xFF).toByte()
+            packet[1] = ((length ushr 16) and 0xFF).toByte()
+            packet[2] = ((length ushr 8) and 0xFF).toByte()
+            packet[3] = (length and 0xFF).toByte()
+            System.arraycopy(frame, 0, packet, PACKET_HEADER_BYTES, frame.size)
+            return packet
+        }
+
+        private fun encodePayload(frame: ByteArray, codec: String): ByteArray? {
+            if (codec != OPUS_CODEC) {
+                return frame
+            }
+            return try {
+                val encoder = opusEncoder ?: AndroidOpusEncoder(sampleRate).also { opusEncoder = it }
+                encoder.encode(frame)
+            } catch (error: Exception) {
+                onError("Opus encode failed on Android: ${error.localizedMessage ?: "unknown error"}")
+                null
+            }
+        }
+    }
+
+    private class AndroidOpusEncoder(
+        sampleRate: Int,
+    ) {
+        private val codec =
+            MediaCodec.createEncoderByType(OPUS_MIME_TYPE).apply {
+                val format = MediaFormat.createAudioFormat(OPUS_MIME_TYPE, sampleRate, 1).apply {
+                    setInteger(MediaFormat.KEY_BIT_RATE, targetBitrate(sampleRate))
+                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, max(sampleRate / 25, 4096))
+                }
+                configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                start()
+            }
+        private val bufferInfo = MediaCodec.BufferInfo()
+        private var presentationTimeUs = 0L
+
+        fun encode(pcmFrame: ByteArray): ByteArray? {
+            val inputIndex = codec.dequeueInputBuffer(CODEC_TIMEOUT_US)
+            if (inputIndex >= 0) {
+                codec.getInputBuffer(inputIndex)?.apply {
+                    clear()
+                    put(pcmFrame)
+                }
+                codec.queueInputBuffer(inputIndex, 0, pcmFrame.size, presentationTimeUs, 0)
+                presentationTimeUs += STREAM_CHUNK_MILLIS * 1000L
+            } else {
+                return null
+            }
+
+            val packets = mutableListOf<ByteArray>()
+            while (true) {
+                val outputIndex = codec.dequeueOutputBuffer(bufferInfo, CODEC_TIMEOUT_US)
+                when {
+                    outputIndex >= 0 -> {
+                        val outputBuffer = codec.getOutputBuffer(outputIndex)
+                        if (outputBuffer != null && bufferInfo.size > 0 &&
+                            bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0
+                        ) {
+                            val packet = ByteArray(bufferInfo.size)
+                            outputBuffer.position(bufferInfo.offset)
+                            outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                            outputBuffer.get(packet)
+                            packets.add(packet)
+                        }
+                        codec.releaseOutputBuffer(outputIndex, false)
+                    }
+                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ||
+                        outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> break
+                    else -> break
+                }
+            }
+            return when (packets.size) {
+                0 -> null
+                1 -> packets.first()
+                else -> packets.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
+            }
+        }
+
+        fun release() {
+            codec.stop()
+            codec.release()
+        }
+
+        private fun targetBitrate(sampleRate: Int): Int {
+            return when {
+                sampleRate >= 48_000 -> 32_000
+                sampleRate >= 24_000 -> 24_000
+                else -> 16_000
+            }
+        }
+    }
+
+    private class AndroidOpusDecoder(
+        sampleRate: Int,
+    ) {
+        private val codec =
+            MediaCodec.createDecoderByType(OPUS_MIME_TYPE).apply {
+                val format = MediaFormat.createAudioFormat(OPUS_MIME_TYPE, sampleRate, 1).apply {
+                    setInteger(MediaFormat.KEY_PCM_ENCODING, AudioFormat.ENCODING_PCM_16BIT)
+                }
+                configure(format, null, null, 0)
+                start()
+            }
+        private val bufferInfo = MediaCodec.BufferInfo()
+        private var presentationTimeUs = 0L
+
+        fun decode(packet: ByteArray): ByteArray? {
+            val inputIndex = codec.dequeueInputBuffer(CODEC_TIMEOUT_US)
+            if (inputIndex >= 0) {
+                codec.getInputBuffer(inputIndex)?.apply {
+                    clear()
+                    put(packet)
+                }
+                codec.queueInputBuffer(inputIndex, 0, packet.size, presentationTimeUs, 0)
+                presentationTimeUs += STREAM_CHUNK_MILLIS * 1000L
+            } else {
+                return null
+            }
+
+            val pcmChunks = mutableListOf<ByteArray>()
+            while (true) {
+                val outputIndex = codec.dequeueOutputBuffer(bufferInfo, CODEC_TIMEOUT_US)
+                when {
+                    outputIndex >= 0 -> {
+                        val outputBuffer = codec.getOutputBuffer(outputIndex)
+                        if (outputBuffer != null && bufferInfo.size > 0) {
+                            val pcm = ByteArray(bufferInfo.size)
+                            outputBuffer.position(bufferInfo.offset)
+                            outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                            outputBuffer.get(pcm)
+                            pcmChunks.add(pcm)
+                        }
+                        codec.releaseOutputBuffer(outputIndex, false)
+                    }
+                    outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED ||
+                        outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> break
+                    else -> break
+                }
+            }
+            return when (pcmChunks.size) {
+                0 -> null
+                1 -> pcmChunks.first()
+                else -> pcmChunks.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
+            }
+        }
+
+        fun release() {
+            codec.stop()
+            codec.release()
         }
     }
 
@@ -1907,10 +2223,17 @@ class NearbyConnectionsBridge(
         }
     }
 
-    companion object {
+        companion object {
         private const val REQUEST_PERMISSIONS_CODE = 3_101
+        private const val DEFAULT_CODEC = "pcm16"
+        private const val OPUS_CODEC = "opus"
+        private const val OPUS_MIME_TYPE = "audio/opus"
+        private const val CURRENT_TRANSPORT_VERSION = 1
         private const val DEFAULT_STREAM_SAMPLE_RATE = 16_000
         private const val PCM_BYTES_PER_SAMPLE = 2
+        private const val PACKET_HEADER_BYTES = 4
+        private const val MAX_PACKET_BYTES = 64_000
+        private const val CODEC_TIMEOUT_US = 10_000L
         private const val STREAM_CHUNK_MILLIS = 20
         private const val DEFAULT_BUFFER_CHUNKS = 4
         private const val VOICE_PRE_ROLL_FRAMES = 10

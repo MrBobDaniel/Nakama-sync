@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../comms_audio_profile.dart';
 import '../../comms_bloc.dart';
 import '../../comms_event.dart';
 import '../../comms_state.dart';
@@ -177,6 +178,16 @@ class _CommsScreenState extends State<CommsScreen> {
                           border: OutlineInputBorder(),
                         ),
                       ),
+                      const SizedBox(height: 16),
+                      _RoomAudioProfileCard(
+                        selectedProfile: state.audioProfile,
+                        enabled: !isRoomOpen && !isConnected,
+                        onProfileChanged: (profile) {
+                          context.read<CommsBloc>().add(
+                            RoomAudioProfileChanged(profile),
+                          );
+                        },
+                      ),
                       const SizedBox(height: 20),
                       Card(
                         color: const Color(0xFF1A1A1A),
@@ -259,7 +270,10 @@ class _CommsScreenState extends State<CommsScreen> {
                                 }
 
                                 context.read<CommsBloc>().add(
-                                  ConnectToRoomRequested(requestedRoom),
+                                  ConnectToRoomRequested(
+                                    requestedRoom,
+                                    state.audioProfile,
+                                  ),
                                 );
                               },
                         icon: const Icon(Icons.wifi_calling_3),
@@ -464,6 +478,76 @@ class _TransmitModeCard extends StatelessWidget {
       return 'Medium';
     }
     return 'Low';
+  }
+}
+
+class _RoomAudioProfileCard extends StatelessWidget {
+  const _RoomAudioProfileCard({
+    required this.selectedProfile,
+    required this.enabled,
+    required this.onProfileChanged,
+  });
+
+  final CommsAudioProfile selectedProfile;
+  final bool enabled;
+  final ValueChanged<CommsAudioProfile> onProfileChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF171717),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Text(
+                  'Room Audio',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    selectedProfile.description,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.6),
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              initialValue: selectedProfile.id,
+              decoration: const InputDecoration(
+                labelText: 'Audio profile',
+                border: OutlineInputBorder(),
+              ),
+              items: CommsAudioProfile.values
+                  .map(
+                    (profile) => DropdownMenuItem<String>(
+                      value: profile.id,
+                      child: Text(
+                        '${profile.label} (${profile.sampleRate ~/ 1000} kHz)',
+                      ),
+                    ),
+                  )
+                  .toList(growable: false),
+              onChanged: enabled
+                  ? (value) {
+                      onProfileChanged(CommsAudioProfile.fromId(value));
+                    }
+                  : null,
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -695,6 +779,27 @@ class _DiagnosticsCard extends StatelessWidget {
               runSpacing: 8,
               children: [
                 _DiagnosticChip(label: 'room', value: roomId),
+                _DiagnosticChip(
+                  label: 'audio',
+                  value:
+                      '${state.audioProfile.label.toLowerCase()} ${state.audioProfile.sampleRate ~/ 1000}k',
+                ),
+                _DiagnosticChip(label: 'codec', value: diagnostics.codec),
+                if (diagnostics.audioSampleRate case final int sampleRate)
+                  _DiagnosticChip(
+                    label: 'rate',
+                    value: '${sampleRate ~/ 1000}k',
+                  ),
+                if (diagnostics.frameDurationMs case final int frameDurationMs)
+                  _DiagnosticChip(
+                    label: 'frame',
+                    value: '${frameDurationMs}ms',
+                  ),
+                if (diagnostics.transportVersion case final int transportVersion)
+                  _DiagnosticChip(
+                    label: 'transport',
+                    value: 'v$transportVersion',
+                  ),
                 _DiagnosticChip(label: 'event', value: diagnostics.lastEvent),
                 _DiagnosticChip(
                   label: 'discovering',
@@ -1075,7 +1180,11 @@ class _PeerListCard extends StatelessWidget {
                     ),
                     if (peer.streamSampleRate case final int sampleRate)
                       Text(
-                        '${sampleRate ~/ 1000} kHz',
+                        [
+                          if (peer.codec case final String codec when codec.isNotEmpty)
+                            codec,
+                          '${sampleRate ~/ 1000} kHz',
+                        ].join(' • '),
                         style: TextStyle(
                           color: Colors.white.withValues(alpha: 0.5),
                           fontSize: 12,

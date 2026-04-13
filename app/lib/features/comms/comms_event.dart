@@ -1,5 +1,6 @@
 import 'package:equatable/equatable.dart';
 
+import 'comms_audio_profile.dart';
 import 'comms_state.dart';
 
 abstract class CommsEvent extends Equatable {
@@ -10,12 +11,22 @@ abstract class CommsEvent extends Equatable {
 }
 
 class ConnectToRoomRequested extends CommsEvent {
-  const ConnectToRoomRequested(this.roomId);
+  const ConnectToRoomRequested(this.roomId, this.audioProfile);
 
   final String roomId;
+  final CommsAudioProfile audioProfile;
 
   @override
-  List<Object?> get props => [roomId];
+  List<Object?> get props => [roomId, audioProfile];
+}
+
+class RoomAudioProfileChanged extends CommsEvent {
+  const RoomAudioProfileChanged(this.audioProfile);
+
+  final CommsAudioProfile audioProfile;
+
+  @override
+  List<Object?> get props => [audioProfile];
 }
 
 class DisconnectRequested extends CommsEvent {
