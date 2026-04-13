@@ -219,9 +219,11 @@ class NearbyConnectionsBridge(
 
         val requestedRoomId = roomId
         val requestedDisplayName = displayName
+        val requestedAudioConfig = localAudioConfig
         stopSession()
         roomId = requestedRoomId
         displayName = requestedDisplayName
+        localAudioConfig = requestedAudioConfig
         incomingAudioMixer = createIncomingAudioMixer()
 
         val osSessionResult = CommsSessionManager.startSession(
@@ -253,7 +255,7 @@ class NearbyConnectionsBridge(
             emit("error", "Failed to advertise: ${error.localizedMessage ?: "unknown error"}")
         }
 
-        startDiscoveryBurst("Scanning briefly for nearby peers in this room.")
+        startDiscoveryBurst("Scanning for nearby peers in this room.")
         result.success(null)
     }
 
@@ -632,7 +634,7 @@ class NearbyConnectionsBridge(
                 outgoingAudioFanout = null
             }
             syncVoiceActivation()
-            startDiscoveryBurst("Peer left range. Scanning briefly for reconnects.")
+            startDiscoveryBurst("Peer left range. Continuing Nearby scan for reconnects.")
         }
     }
 
@@ -707,7 +709,7 @@ class NearbyConnectionsBridge(
                 outgoingAudioFanout = null
             }
             syncVoiceActivation()
-            startDiscoveryBurst("Peer disconnected. Scanning briefly for another nearby peer.")
+            startDiscoveryBurst("Peer disconnected. Continuing Nearby scan for another nearby peer.")
         }
     }
 
@@ -922,7 +924,6 @@ class NearbyConnectionsBridge(
 
         if (isDiscovering || isDiscoveryStartInFlight) {
             emit("session_started", message, mapOf("isDiscovering" to true))
-            scheduleDiscoveryStop()
             return
         }
 
@@ -939,21 +940,11 @@ class NearbyConnectionsBridge(
         ).addOnSuccessListener {
             isDiscoveryStartInFlight = false
             emit("session_started", message, mapOf("isDiscovering" to true))
-            scheduleDiscoveryStop()
         }.addOnFailureListener { error ->
             isDiscoveryStartInFlight = false
             isDiscovering = false
             emit("error", "Failed to discover peers: ${error.localizedMessage ?: "unknown error"}")
         }
-    }
-
-    private fun scheduleDiscoveryStop() {
-        val runnable = Runnable {
-            stopDiscovery()
-            emit("discovery_idle", "Room is open. Listening for incoming connections.")
-        }
-        discoveryStopRunnable = runnable
-        mainHandler.postDelayed(runnable, DISCOVERY_WINDOW_MILLIS)
     }
 
     private fun stopDiscovery() {
@@ -1012,7 +1003,7 @@ class NearbyConnectionsBridge(
                     mapOf("isDiscovering" to isDiscovering),
                 )
                 mainHandler.postDelayed(
-                    { startDiscoveryBurst("Retrying a brief Nearby scan while this room stays open.") },
+                    { startDiscoveryBurst("Retrying Nearby scan while this room stays open.") },
                     CONNECTION_RETRY_DELAY_MILLIS,
                 )
             }
@@ -2199,7 +2190,6 @@ class NearbyConnectionsBridge(
         private const val VOICE_ATTACK_FRAMES = 3
         private const val VOICE_RELEASE_HANGOVER_MILLIS = 700
         private const val DEFAULT_VOICE_ACTIVATION_SENSITIVITY = 0.55
-        private const val DISCOVERY_WINDOW_MILLIS = 15_000L
         private const val CONNECTION_REQUEST_DELAY_MILLIS = 250L
         private const val CONNECTION_RETRY_DELAY_MILLIS = 2_000L
         private const val MAX_BUFFERED_FRAMES = 6

@@ -147,9 +147,11 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     #if canImport(NearbyConnections)
     let requestedRoomID = roomID
     let requestedDisplayName = displayName
+    let requestedAudioConfig = localAudioConfig
     stopSession()
     roomID = requestedRoomID
     displayName = requestedDisplayName
+    localAudioConfig = requestedAudioConfig
     audioController.stopAll()
     audioController = makeAudioController()
     let osSessionResult = commsSessionManager.startSession(
@@ -182,7 +184,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
     let discoverer = Discoverer(connectionManager: connectionManager)
     discoverer.delegate = self
     self.discoverer = discoverer
-    startDiscoveryBurst(message: "Scanning briefly for nearby peers in this room.")
+    startDiscoveryBurst(message: "Scanning for nearby peers in this room.")
 
     result(nil)
     #else
@@ -596,7 +598,7 @@ extension NearbyConnectionsBridge: DiscovererDelegate {
       )
     }
     syncVoiceActivation()
-    startDiscoveryBurst(message: "Peer left range. Scanning briefly for reconnects.")
+    startDiscoveryBurst(message: "Peer left range. Continuing Nearby scan for reconnects.")
   }
 }
 
@@ -648,7 +650,7 @@ extension NearbyConnectionsBridge: ConnectionManagerDelegate {
       }
       syncVoiceActivation()
       emit(event: "disconnected", message: "Nearby peer disconnected. Room remains open for new connections.")
-      startDiscoveryBurst(message: "Peer disconnected. Scanning briefly for another nearby peer.")
+      startDiscoveryBurst(message: "Peer disconnected. Continuing Nearby scan for another nearby peer.")
     default:
       break
     }
@@ -845,20 +847,13 @@ private extension NearbyConnectionsBridge {
 
   func startDiscoveryBurst(message: String) {
     discoveryStopWorkItem?.cancel()
+    if isDiscovering {
+      emit(event: "session_started", message: message, extra: ["isDiscovering": true])
+      return
+    }
     isDiscovering = true
     discoverer?.startDiscovery()
     emit(event: "session_started", message: message, extra: ["isDiscovering": true])
-    scheduleDiscoveryStop()
-  }
-
-  func scheduleDiscoveryStop() {
-    let workItem = DispatchWorkItem { [weak self] in
-      guard let self else { return }
-      self.stopDiscovery()
-      self.emit(event: "discovery_idle", message: "Room is open. Listening for incoming connections.")
-    }
-    discoveryStopWorkItem = workItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: workItem)
   }
 
   func stopDiscovery() {
