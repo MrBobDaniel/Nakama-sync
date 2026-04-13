@@ -53,6 +53,7 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   #endif
 
   func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    NSLog("NEARBY_CALL method=%@", call.method)
     switch call.method {
     case "startSession":
       guard
@@ -75,6 +76,15 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
       self.roomID = Self.normalizeRoomID(roomID)
       self.displayName = displayName
       localAudioConfig = parseAudioConfig(arguments)
+      NSLog(
+        "NEARBY_CALL startSession roomId=%@ displayName=%@ codec=%@ sampleRate=%d frameMs=%d transport=%d",
+        self.roomID ?? "null",
+        self.displayName,
+        localAudioConfig.codec,
+        localAudioConfig.preferredSampleRate,
+        localAudioConfig.frameDurationMs,
+        localAudioConfig.transportVersion
+      )
       startSession(result: result)
 
     case "setPushToTalkActive":
@@ -137,17 +147,20 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
   }
 
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
+    NSLog("NEARBY_STREAM onListen")
     eventSink = events
     return nil
   }
 
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    NSLog("NEARBY_STREAM onCancel")
     eventSink = nil
     return nil
   }
 
   private func startSession(result: @escaping FlutterResult) {
     #if canImport(NearbyConnections)
+    NSLog("NEARBY_START entering startSession")
     let requestedRoomID = roomID
     let requestedDisplayName = displayName
     let requestedPeerID = localPeerID
@@ -183,16 +196,19 @@ final class NearbyConnectionsBridge: NSObject, FlutterStreamHandler {
 
     let advertiser = Advertiser(connectionManager: connectionManager)
     advertiser.delegate = self
+    NSLog("NEARBY_START advertiser_start")
     advertiser.startAdvertising(using: context)
     self.advertiser = advertiser
 
     let discoverer = Discoverer(connectionManager: connectionManager)
     discoverer.delegate = self
     self.discoverer = discoverer
+    NSLog("NEARBY_START discoverer_created")
     startDiscoveryBurst(message: "Scanning for nearby peers in this room.")
 
     result(nil)
     #else
+    NSLog("NEARBY_START sdk_missing")
     emit(
       event: "unsupported",
       message: "Nearby Connections Swift package is not linked into the iOS target yet."
